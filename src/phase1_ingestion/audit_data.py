@@ -14,6 +14,10 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
+# Forcer UTF-8 sur Windows pour éviter les erreurs d'encodage dans le terminal
+if sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 import duckdb
 from loguru import logger
 

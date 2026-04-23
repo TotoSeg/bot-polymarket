@@ -15,6 +15,10 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+# Forcer UTF-8 sur Windows pour éviter les erreurs d'encodage dans le terminal
+if sys.stdout.encoding != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ── Loguru : logger moderne et coloré ────────────────────────────────────────
 from loguru import logger
 
@@ -28,7 +32,7 @@ from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
 
 # Identifiant du dataset HuggingFace (format : "organisation/nom-du-dataset")
 # Exemple : "Polymarket/polymarket-data" ou "moncompte/mon-dataset"
-HF_DATASET_ID = "Sandi0/polymarket"  # ← À adapter si nécessaire
+HF_DATASET_ID = "SII-WANGZJ/Polymarket_data"  # Dataset vérifié — contient markets/quant/users.parquet
 
 # Type de dépôt HuggingFace : "dataset" ou "model"
 HF_REPO_TYPE = "dataset"
@@ -152,7 +156,7 @@ def main(files_to_download: list[str]):
     for filename in files_to_download:
         logger.info(f"\n{'─' * 40}")
         success = download_file(filename, HF_DATASET_ID)
-        results[filename] = "✓ OK" if success else "✗ ÉCHEC"
+        results[filename] = "[OK]" if success else "[ECHEC]"
 
     # Résumé final
     logger.info(f"\n{'=' * 60}")

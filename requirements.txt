@@ -1,0 +1,27 @@
+# ── Données & requêtes ──────────────────────────────────────────────────────
+duckdb>=1.1.0              # Requêtes SQL sur fichiers Parquet sans tout charger en RAM
+pandas>=2.2.0              # Manipulation de données tabulaires
+polars>=0.20.0             # Alternative ultra-rapide à Pandas (lecture Parquet)
+pyarrow>=15.0.0            # Backend Parquet pour Pandas/Polars
+
+# ── Téléchargement HuggingFace ───────────────────────────────────────────────
+huggingface-hub>=0.23.0    # Client Python pour télécharger depuis HuggingFace
+tqdm>=4.66.0               # Barre de progression pendant les téléchargements
+
+# ── Visualisation ────────────────────────────────────────────────────────────
+matplotlib>=3.8.0          # Graphiques statiques
+plotly>=5.20.0             # Graphiques interactifs
+kaleido>=0.2.1             # Export des graphiques Plotly en PNG/PDF
+
+# ── Notebooks ────────────────────────────────────────────────────────────────
+jupyter>=1.0.0             # Interface Jupyter Notebook
+ipykernel>=6.29.0          # Kernel Python pour Jupyter
+
+# ── API Polymarket ───────────────────────────────────────────────────────────
+requests>=2.31.0           # Requêtes HTTP (appels API)
+websocket-client>=1.7.0    # WebSocket pour données temps réel
+
+# ── Utilitaires ──────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0       # Chargement des variables d'environnement (.env)
+loguru>=0.7.0              # Logging moderne et simple
+rich>=13.7.0               # Affichage coloré dans le terminal

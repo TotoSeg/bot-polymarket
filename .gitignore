@@ -1,0 +1,40 @@
+# ── Données brutes (trop volumineuses pour Git) ──────────────────────────────
+data/
+*.parquet
+*.csv.gz
+
+# ── Environnements Python ─────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+
+# ── Variables d'environnement (clés API, secrets) ────────────────────────────
+.env
+.env.local
+*.key
+
+# ── Jupyter ───────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_meta
+
+# ── Logs & outputs (générés automatiquement) ─────────────────────────────────
+logs/*.log
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── DuckDB cache ──────────────────────────────────────────────────────────────
+*.duckdb
+*.duckdb.wal

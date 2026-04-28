@@ -44,9 +44,16 @@ if sys.stdout.encoding != "utf-8":
 # Frais Polymarket : 2% du profit
 POLYMARKET_FEE = 0.02
 
-# Fraction Kelly et borne max (identique au backtest)
+# Fraction Kelly et borne max
 KELLY_FRACTION = 0.25
-MAX_BET_PCT    = 0.10   # 10% du capital initial max par trade
+MAX_BET_PCT    = 0.05   # 5% du capital initial max par trade (↓ de 10%)
+                         # → permet ~20 positions simultanées au lieu de 10
+
+# Nb max de positions par stratégie (évite sur-concentration)
+MAX_POSITIONS_PER_STRATEGY = {
+    "S1": 10, "S2": 30, "S3": 15, "S4": 10,
+    "S5": 5,  "S6": 10, "BTC": 10,
+}
 
 
 def _kelly_size(win_rate: float, p_yes: float, initial_capital: float) -> float:
@@ -97,6 +104,16 @@ def add_position(portfolio: dict, market: dict, strategy: str,
     market_id = str(market.get("id", ""))
     if market_id in portfolio["positions_ouvertes"]:
         return False  # Déjà en portefeuille
+
+    # Vérifier la limite par stratégie
+    nb_open_strat = sum(
+        1 for p in portfolio["positions_ouvertes"].values()
+        if p["strategy"] == strategy
+    )
+    max_strat = MAX_POSITIONS_PER_STRATEGY.get(strategy, 10)
+    if nb_open_strat >= max_strat:
+        logger.debug(f"Limite {strategy} atteinte ({nb_open_strat}/{max_strat})")
+        return False
 
     initial_capital = portfolio["capital_initial"]
     bet_amount = _kelly_size(win_rate_prior, entry_price_yes, initial_capital)

@@ -1,0 +1,6 @@
+spike_type,nb_marches,pct_no_gagne,pct_yes_gagne
+A. Spike >= 10x,5193,68.1,31.9
+B. Spike 5-10x,19997,69.5,30.5
+C. Spike 2-5x,77344,72.4,27.6
+D. Normal 1-2x,394258,63.2,36.8
+E. Baisse < 1x,13234,89.7,10.3

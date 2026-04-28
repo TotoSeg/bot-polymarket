@@ -103,21 +103,49 @@ def get_btc_context() -> dict:
 
 def get_btc_updown_markets() -> list[dict]:
     """
-    Récupère les marchés Polymarket "BTC Up or Down" actifs.
-    Filtre sur les mots-clés bitcoin + up or down.
+    Récupère les marchés Polymarket de direction BTC actifs.
+
+    Filtre deux types :
+      1. "Up or Down" classiques (ex: "Will BTC be higher or lower on...")
+      2. Price targets court-terme (ex: "Will BTC hit $80k by end of week?")
+         → seulement si end_date < 14 jours pour garder la corrélation 5m
     """
+    from datetime import timezone, timedelta
     all_markets = get_active_markets(min_volume=MIN_VOLUME_BTC_MARKET, max_pages=20)
+    now = datetime.now(tz=timezone.utc)
 
     btc_markets = []
     for m in all_markets:
         q = str(m.get("question", "")).lower()
-        if ("bitcoin" in q or " btc" in q) and ("up or down" in q or "higher" in q or "lower" in q):
-            yes_price = parse_yes_price(m)
-            if yes_price is not None and 0.05 <= yes_price <= 0.95:
-                m["_yes_price"] = yes_price
-                btc_markets.append(m)
+        is_btc = "bitcoin" in q or " btc" in q or q.startswith("btc")
+        if not is_btc:
+            continue
 
-    logger.info(f"Marchés BTC Up/Down actifs trouvés : {len(btc_markets)}")
+        # Type 1 : marchés directionnels explicites
+        is_directional = ("up or down" in q or "higher" in q or "lower" in q
+                          or "above" in q or "below" in q)
+
+        # Type 2 : price target court-terme (≤14 jours)
+        is_short_target = False
+        if not is_directional and ("hit" in q or "reach" in q or "exceed" in q):
+            end_raw = m.get("endDate") or m.get("end_date")
+            if end_raw:
+                try:
+                    end_dt = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00"))
+                    if (end_dt - now).days <= 14:
+                        is_short_target = True
+                except (ValueError, AttributeError):
+                    pass
+
+        if not (is_directional or is_short_target):
+            continue
+
+        yes_price = parse_yes_price(m)
+        if yes_price is not None and 0.05 <= yes_price <= 0.95:
+            m["_yes_price"] = yes_price
+            btc_markets.append(m)
+
+    logger.info(f"Marchés BTC directionnels actifs : {len(btc_markets)}")
     for m in btc_markets[:5]:
         logger.info(f"  {m.get('question','')[:60]:60s} | YES={m['_yes_price']:.3f}")
     return btc_markets

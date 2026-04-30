@@ -1,10 +1,11 @@
 """
-Phase 5 — Détection des signaux S3 uniquement
-===============================================
-S3 : YES entre 5 % et 10 %, résolution NO dans 98.1 % des cas.
+Phase 5 — Signaux S3 + SP
+==========================
+S3  : YES 5-10%, tous marchés hors crypto. WR 99.7%, ROI +1495% sur 2024-25.
+SP  : YES 5-35%, marchés politiques/géopolitiques. WR 94.9%, ROI +1522% sur 2024-25.
 
-Win rate prior dynamique selon volume + catégorie + durée + sweetspot prix.
-Score 0-10 pour trier quand le capital est limité.
+Les deux stratégies sont indépendantes et peuvent coexister sur le même marché
+(un marché politique YES=7% déclenche S3 ET SP).
 """
 
 import sys
@@ -14,18 +15,36 @@ from typing import Optional
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# ── Mots-clés ─────────────────────────────────────────────────────────────────
+
+_KW_CRYPTO = ["bitcoin", " btc", "ethereum", " eth", "solana", "xrp", "crypto",
+              "up or down", "updown"]
+
+_KW_POL = [
+    "trump", "biden", "harris", "election", "congress", "senate", "president",
+    "democrat", "republican", "white house", "governor", "midterm", "parliament",
+    "prime minister", "chancellor", "ceasefire", "nato", "sanction", "coup",
+    "invasion", "referendum", "vote", "tariff", "legislation", "war", "treaty",
+    "nuclear", "troops", "geopolit", "diplomacy",
+]
+
 _KW_POL_US = ["president", "trump", "biden", "harris", "congress", "senate",
               "democrat", "republican", "white house", "governor", "midterm"]
 _KW_POL_WO = ["parliament", "prime minister", "chancellor", "ceasefire",
               "nato", "sanction", "coup", "invasion", "election"]
 _KW_TECH   = ["ai", "openai", "gpt", "apple", "google", "meta", "microsoft",
               "amazon", "tesla", "spacex", "elon", "nvidia", "chatgpt"]
-_KW_CRYPTO = ["bitcoin", " btc", "ethereum", " eth", "solana", "xrp", "crypto",
-              "up or down", "updown"]
+
+
+def _is_crypto(q: str) -> bool:
+    return any(k in q for k in _KW_CRYPTO)
+
+
+def _is_political(q: str) -> bool:
+    return any(k in q for k in _KW_POL)
 
 
 def _category(q: str) -> str:
-    q = q.lower()
     if any(k in q for k in _KW_POL_US): return "politics_us"
     if any(k in q for k in _KW_POL_WO): return "politics_world"
     if any(k in q for k in _KW_TECH):   return "tech"
@@ -45,39 +64,34 @@ def _market_duration_days(market: dict) -> Optional[float]:
         return None
 
 
-def check_signals(market: dict, yes_price: float) -> list[dict]:
-    """
-    Retourne les signaux S3 pour un marché donné.
-    Exclut les marchés crypto (pas de signal S3 sur BTC/ETH Up or Down).
-    """
-    question = str(market.get("question", ""))
-    if any(k in question.lower() for k in _KW_CRYPTO):
-        return []
+# ── S3 ────────────────────────────────────────────────────────────────────────
+
+def _s3_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dict]:
+    """S3 : YES 5-10%, hors crypto. WR prior dynamique selon volume/catégorie/durée."""
     if not (0.05 <= yes_price <= 0.10):
-        return []
+        return None
 
     volume = float(market.get("volume", 0) or 0)
 
-    # Base win rate par volume (backtest T2)
-    if volume >= 20_000:   base = 0.999; vd = f"vol={volume/1000:.0f}K$→99.9%"
-    elif volume >= 5_000:  base = 0.981; vd = f"vol={volume/1000:.0f}K$→98.1%"
-    elif volume >= 1_000:  base = 0.977; vd = f"vol={volume/1000:.1f}K$→97.7%"
-    else:                  base = 0.992; vd = f"vol={volume:.0f}$→99.2%"
+    if volume >= 20_000:   base = 0.999; vd = f"vol={volume/1000:.0f}K->99.9%"
+    elif volume >= 5_000:  base = 0.981; vd = f"vol={volume/1000:.0f}K->98.1%"
+    elif volume >= 1_000:  base = 0.977; vd = f"vol={volume/1000:.1f}K->97.7%"
+    else:                  base = 0.992; vd = f"vol={volume:.0f}->99.2%"
 
     bonus = 0.0; details = [vd]; score = 5.0
 
-    cat = _category(question)
+    cat = _category(question_lc)
     if cat in ("politics_us", "politics_world"):
-        bonus += 0.015; details.append(f"{cat}→+1.5pp"); score += 2
+        bonus += 0.015; details.append(f"{cat}->+1.5pp"); score += 2
     elif cat == "tech":
-        bonus += 0.005; details.append("tech→+0.5pp"); score += 0.5
+        bonus += 0.005; details.append("tech->+0.5pp"); score += 0.5
 
     dur = _market_duration_days(market)
     if dur is not None and 30 <= dur <= 90:
-        bonus += 0.015; details.append(f"dur={dur:.0f}j→+1.5pp"); score += 1
+        bonus += 0.015; details.append(f"dur={dur:.0f}j->+1.5pp"); score += 1
 
     if 0.060 <= yes_price <= 0.070:
-        bonus += 0.005; details.append("sweetspot→+0.5pp"); score += 0.5
+        bonus += 0.005; details.append("sweetspot->+0.5pp"); score += 0.5
 
     if volume >= 20_000: score += 2
     elif volume >= 5_000: score += 1
@@ -85,9 +99,77 @@ def check_signals(market: dict, yes_price: float) -> list[dict]:
     prior = min(base + bonus, 0.999)
     score = min(score, 10.0)
 
-    return [{
+    return {
         "strategy":       "S3",
         "win_rate_prior": prior,
-        "reason":         f"YES={yes_price:.3f}, " + ", ".join(details) + f" → prior={prior:.4f}",
+        "reason":         f"YES={yes_price:.3f}, " + ", ".join(details) + f" prior={prior:.4f}",
         "score":          score,
-    }]
+    }
+
+
+# ── SP ────────────────────────────────────────────────────────────────────────
+
+def _sp_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dict]:
+    """
+    SP : marchés politiques/géopolitiques, YES 5-35%.
+    Backtest 2024-25 : WR 94.9%, ROI +1522%.
+    Plus rentable par trade que S3 sur la tranche 10-35% (ROI 16-26%).
+    """
+    if not (0.05 <= yes_price <= 0.35):
+        return None
+
+    # Prior et score selon la tranche de prix
+    if yes_price < 0.10:
+        prior = 0.999; score = 8.0; tier = "5-10%->99.9%"
+    elif yes_price < 0.20:
+        prior = 0.992; score = 7.0; tier = "10-20%->99.2%"
+    else:
+        prior = 0.922; score = 6.0; tier = "20-35%->92.2%"
+
+    # Bonus catégorie
+    cat = _category(question_lc)
+    if cat == "politics_us":
+        score += 1.5; tier += ",pol_US"
+    elif cat == "politics_world":
+        score += 1.0; tier += ",pol_WO"
+
+    volume = float(market.get("volume", 0) or 0)
+    if volume >= 20_000: score += 1.0
+    elif volume >= 5_000: score += 0.5
+
+    score = min(score, 10.0)
+
+    return {
+        "strategy":       "SP",
+        "win_rate_prior": prior,
+        "reason":         f"YES={yes_price:.3f}, pol/geo, {tier}",
+        "score":          score,
+    }
+
+
+# ── Point d'entrée ────────────────────────────────────────────────────────────
+
+def check_signals(market: dict, yes_price: float) -> list[dict]:
+    """
+    Analyse un marché live et retourne les signaux déclenchés (S3 et/ou SP).
+
+    Un marché politique YES=7% déclenche les deux simultanément.
+    Le bot priorise par score décroissant quand le capital est limité.
+    """
+    signals = []
+    question = str(market.get("question", ""))
+    question_lc = question.lower()
+
+    if _is_crypto(question_lc):
+        return []
+
+    sig_s3 = _s3_signal(market, yes_price, question_lc)
+    if sig_s3:
+        signals.append(sig_s3)
+
+    if _is_political(question_lc):
+        sig_sp = _sp_signal(market, yes_price, question_lc)
+        if sig_sp:
+            signals.append(sig_sp)
+
+    return signals

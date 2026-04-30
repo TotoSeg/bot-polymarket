@@ -51,8 +51,8 @@ MAX_BET_PCT    = 0.05   # 5% du capital initial max par trade (↓ de 10%)
 
 # Nb max de positions par stratégie (évite sur-concentration)
 MAX_POSITIONS_PER_STRATEGY = {
-    "S1": 10, "S2": 30, "S3": 15, "S4": 10,
-    "S5": 5,  "S6": 10, "BTC": 10,
+    "S3": 15,   # YES 5-10% tous marchés
+    "SP": 10,   # YES 5-35% politique/géopo (plus de variance → limite réduite)
 }
 
 

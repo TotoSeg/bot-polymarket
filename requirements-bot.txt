@@ -1,0 +1,15 @@
+# Dépendances minimales pour le VPS (sans les outils d'analyse)
+# Installer avec : pip install -r requirements-bot.txt
+
+# Requêtes HTTP et API
+requests>=2.31.0           # Appels API Polymarket Gamma + CLOB
+websocket-client>=1.7.0    # WebSocket (optionnel, pour données temps réel)
+
+# Polymarket CLOB (ordres réels)
+py-clob-client>=0.17.0     # Client officiel Polymarket CLOB
+eth-account>=0.11.0        # Signature ECDSA des ordres (requis par py-clob-client)
+
+# Logging et utilitaires
+loguru>=0.7.0              # Logging structuré
+python-dotenv>=1.0.0       # Chargement du fichier .env
+rich>=13.7.0               # Affichage coloré dans le terminal

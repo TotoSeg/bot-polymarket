@@ -1,11 +1,13 @@
 """
-Phase 6 — Bot de trading réel Polymarket (stratégie S3)
-========================================================
-Tourne en boucle toutes les heures, scanne les marchés S3 (YES 5-10%)
-et place des ordres réels via le CLOB Polymarket.
+Phase 6 — Bot de trading réel Polymarket (stratégies S3 + SP)
+==============================================================
+Tourne en boucle toutes les heures, scanne les marchés :
+  S3 : YES 5-10%, tous marchés hors crypto (WR 99.7%)
+  SP : YES 5-35%, marchés politiques/géopolitiques (WR 94.9%)
+et place des ordres réels de type NO via le CLOB Polymarket.
 
 PRÉREQUIS avant de lancer :
-  1. Copier src/phase6_bot/.env.example → src/phase6_bot/.env et remplir
+  1. Copier src/phase6_bot/.env.example -> src/phase6_bot/.env et remplir
   2. Déposer des USDC sur le wallet Polygon (adresse dans .env)
   3. Générer les clés API : python src/phase6_bot/live_bot.py --create-keys
   4. Tester en dry-run d'abord : python src/phase6_bot/live_bot.py --dry-run
@@ -65,15 +67,15 @@ def run_once(dry_run: bool = False):
     """
     Un cycle complet :
       1. Résoudre les positions dont le marché est clos
-      2. Scanner les marchés S3
-      3. Placer les ordres (ou simuler si dry_run=True)
+      2. Scanner les marchés S3 (YES 5-10%) et SP (YES 5-35%, politique/géopo)
+      3. Placer les ordres NO (ou simuler si dry_run=True)
     """
     portfolio = load_portfolio(PORTFOLIO_FILE)
     client    = None if dry_run else build_client()
 
     logger.info("=" * 60)
-    logger.info(f"LIVE BOT S3 — {datetime.now().strftime('%Y-%m-%d %H:%M')} "
-                f"{'[DRY-RUN]' if dry_run else '[RÉEL]'}")
+    logger.info(f"LIVE BOT S3+SP — {datetime.now().strftime('%Y-%m-%d %H:%M')} "
+                f"{'[DRY-RUN]' if dry_run else '[REEL]'}")
     logger.info("=" * 60)
 
     # ── Afficher le solde réel ────────────────────────────────────────────────
@@ -95,8 +97,9 @@ def run_once(dry_run: bool = False):
         time.sleep(0.1)
     logger.info(f"Positions fermées ce cycle : {nb_closed}")
 
-    # ── 2. Scanner les marchés S3 ─────────────────────────────────────────────
-    logger.info("Scan des marchés actifs...")
+    # ── 2. Scanner les marchés S3 + SP ────────────────────────────────────────
+    # SP couvre jusqu'à YES=35%, donc on scanne jusqu'à 0.35
+    logger.info("Scan des marchés actifs (S3 + SP)...")
     markets = get_active_markets(min_volume=int(os.getenv("MIN_VOLUME_USD", "500")),
                                  max_pages=30)
 
@@ -104,23 +107,29 @@ def run_once(dry_run: bool = False):
     nb_new   = 0
     skipped  = 0
 
-    # Collecter et trier par score décroissant
+    # Collecter tous les signaux S3 et SP, trier par score décroissant
     candidates = []
     for m in markets:
         yp = parse_yes_price(m)
-        if not yp or not (0.05 <= yp <= 0.10):
+        if not yp or not (0.05 <= yp <= 0.35):
             continue
         sigs = check_signals(m, yp)
         for s in sigs:
-            if s["strategy"] == "S3":
-                candidates.append((s["score"], m, s, yp))
+            candidates.append((s["score"], m, s, yp))
     candidates.sort(key=lambda x: -x[0])
 
-    for score, m, sig, yp in candidates:
-        mid = str(m.get("id", ""))
+    logger.info(f"Candidats trouvés : {len(candidates)} signaux")
 
-        # Déjà en portefeuille
-        if mid in portfolio["positions_ouvertes"]:
+    for score, m, sig, yp in candidates:
+        mid      = str(m.get("id", ""))
+        strategy = sig["strategy"]
+
+        # Déjà en portefeuille (même marché, même stratégie)
+        pos_key = f"{mid}_{strategy}"
+        if any(
+            p["market_id"] == mid and p["strategy"] == strategy
+            for p in portfolio["positions_ouvertes"].values()
+        ):
             continue
 
         # Calculer la mise Kelly (plafonnée à MAX_BET_USDC)
@@ -140,21 +149,18 @@ def run_once(dry_run: bool = False):
             continue
 
         if dry_run:
-            # Simuler sans placer d'ordre réel
-            logger.info(f"  [DRY-RUN] S3 | {m.get('question','')[:50]:50s} | "
-                        f"YES={yp:.3f} | NO_token={no_token[:12]}... | Mise={bet:.2f}$")
-            add_position(portfolio, m, "S3", sig["win_rate_prior"], yp, sig["reason"])
+            logger.info(f"  [DRY-RUN] {strategy:3s} | {m.get('question','')[:50]:50s} | "
+                        f"YES={yp:.3f} | Mise={bet:.2f}$")
+            add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"])
             nb_new += 1
         else:
-            # Vérifier liquidité puis placer l'ordre
             if not check_liquidity(client, no_token, bet):
                 skipped += 1
                 continue
             resp = place_no_order(client, no_token, bet, yp)
             if resp:
-                # Enregistrer la position (avec order_id pour suivi)
                 m["_order_id"] = resp.get("orderID", "")
-                add_position(portfolio, m, "S3", sig["win_rate_prior"], yp, sig["reason"])
+                add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"])
                 nb_new += 1
             else:
                 skipped += 1
@@ -199,7 +205,7 @@ def cmd_status():
 
 def main():
     setup()
-    parser = argparse.ArgumentParser(description="Live bot Polymarket S3")
+    parser = argparse.ArgumentParser(description="Live bot Polymarket S3+SP")
     parser.add_argument("--create-keys", action="store_true", help="Générer les clés API")
     parser.add_argument("--status",      action="store_true", help="Solde + positions")
     parser.add_argument("--dry-run",     action="store_true", help="Simuler sans ordres réels")

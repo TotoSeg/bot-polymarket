@@ -15,7 +15,7 @@
 set -e  # Arrêter si une commande échoue
 
 # ── CONFIGURATION — à adapter avant de lancer ────────────────────────────────
-REPO_URL="https://github.com/TON_COMPTE/bot-polymarket.git"  # REMPLACER
+REPO_URL="https://github.com/TotoSeg/bot-polymarket.git"
 BRANCH="phase/1-ingestion"
 BOT_DIR="$HOME/bot-polymarket"
 # ─────────────────────────────────────────────────────────────────────────────

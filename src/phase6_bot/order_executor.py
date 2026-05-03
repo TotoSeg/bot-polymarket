@@ -45,7 +45,7 @@ def build_client() -> ClobClient:
         chain_id       = 137,
         key            = pk,
         creds          = creds,
-        signature_type = 1,
+        signature_type = 2,      # GNOSIS_SAFE — MetaMask + proxy Polymarket
         funder         = funder,
     )
 
@@ -156,7 +156,7 @@ def place_no_order(client: ClobClient, token_id: str,
 def get_usdc_balance(client: ClobClient) -> float:
     """Retourne le solde pUSD disponible sur le compte Polymarket."""
     try:
-        bal = client.get_balance_allowance(params={"asset_type": "COLLATERAL"})
+        bal = client.get_balance_allowance(asset_type="COLLATERAL")
         return float(bal.get("balance", 0)) / 1e6
     except Exception as e:
         logger.warning(f"Solde non récupéré : {e}")

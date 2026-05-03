@@ -107,7 +107,26 @@ def run_once(dry_run: bool = False):
     nb_new   = 0
     skipped  = 0
 
-    # Collecter tous les signaux S3 et SP, trier par score décroissant
+    # Collecter tous les signaux S3 et SP
+    # Tri : résolution la plus proche d'abord (P&L composé plus rapide),
+    #        puis score décroissant en cas d'ex-æquo.
+    FAR_FUTURE = datetime(9999, 12, 31, tzinfo=timezone.utc)
+
+    def parse_end_date(m: dict) -> datetime:
+        raw = m.get("endDate") or m.get("end_date_iso") or ""
+        if not raw:
+            return FAR_FUTURE
+        try:
+            # Format ISO 8601 : "2025-06-15T23:59:00Z" ou "2025-06-15"
+            raw = raw.rstrip("Z").replace("Z", "+00:00")
+            if "T" in raw:
+                dt = datetime.fromisoformat(raw)
+            else:
+                dt = datetime.fromisoformat(raw + "T00:00:00")
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+        except (ValueError, TypeError):
+            return FAR_FUTURE
+
     candidates = []
     for m in markets:
         yp = parse_yes_price(m)
@@ -115,12 +134,13 @@ def run_once(dry_run: bool = False):
             continue
         sigs = check_signals(m, yp)
         for s in sigs:
-            candidates.append((s["score"], m, s, yp))
-    candidates.sort(key=lambda x: -x[0])
+            candidates.append((parse_end_date(m), -s["score"], m, s, yp))
+    # Résolution la plus proche en premier, score le plus élevé en cas d'ex-æquo
+    candidates.sort(key=lambda x: (x[0], x[1]))
 
     logger.info(f"Candidats trouvés : {len(candidates)} signaux")
 
-    for score, m, sig, yp in candidates:
+    for end_dt, _neg_score, m, sig, yp in candidates:
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
 
@@ -149,7 +169,8 @@ def run_once(dry_run: bool = False):
             continue
 
         if dry_run:
-            logger.info(f"  [DRY-RUN] {strategy:3s} | {m.get('question','')[:50]:50s} | "
+            end_str = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "???"
+            logger.info(f"  [DRY-RUN] {strategy:3s} | {end_str} | {m.get('question','')[:45]:45s} | "
                         f"YES={yp:.3f} | Mise={bet:.2f}$")
             add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"])
             nb_new += 1

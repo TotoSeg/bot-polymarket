@@ -30,18 +30,23 @@ from py_clob_client_v2 import (
 def build_client() -> ClobClient:
     """
     Instancie le client CLOB V2 authentifié depuis les variables d'env.
+    signature_type=1 (POLY_PROXY) + funder = adresse proxy pUSD obligatoires
+    pour que le CLOB identifie correctement le solde du wallet proxy.
     """
-    pk = os.environ["POLYMARKET_PRIVATE_KEY"]
-    creds = ApiCreds(
+    pk     = os.environ["POLYMARKET_PRIVATE_KEY"]
+    funder = os.environ.get("POLYMARKET_PROXY_WALLET", "").strip() or None
+    creds  = ApiCreds(
         api_key        = os.environ["POLYMARKET_API_KEY"],
         api_secret     = os.environ["POLYMARKET_API_SECRET"],
         api_passphrase = os.environ["POLYMARKET_API_PASSPHRASE"],
     )
     return ClobClient(
-        host     = "https://clob.polymarket.com",
-        chain_id = 137,
-        key      = pk,
-        creds    = creds,
+        host           = "https://clob.polymarket.com",
+        chain_id       = 137,
+        key            = pk,
+        creds          = creds,
+        signature_type = 1,
+        funder         = funder,
     )
 
 
@@ -98,9 +103,15 @@ def get_no_token_id(market: dict) -> Optional[str]:
 def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bool:
     """Vérifie qu'au moins 50% de la mise est couverte par le carnet d'ordres."""
     try:
-        book  = client.get_order_book(token_id)
-        asks  = book.asks or []
-        total = sum(float(a.size) * float(a.price) for a in asks)
+        book = client.get_order_book(token_id)
+        # V2 retourne un dict ou un objet selon la version
+        if isinstance(book, dict):
+            asks = book.get("asks") or []
+        else:
+            asks = book.asks or []
+        total = sum(float(a["size"] if isinstance(a, dict) else a.size) *
+                    float(a["price"] if isinstance(a, dict) else a.price)
+                    for a in asks)
         if total < amount_usdc * 0.5:
             logger.warning(f"Liquidité faible : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
             return False

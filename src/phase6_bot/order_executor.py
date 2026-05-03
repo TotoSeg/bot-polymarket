@@ -1,68 +1,56 @@
 """
-Phase 6 — Exécution des ordres réels sur Polymarket CLOB
-==========================================================
-Wraps le py-clob-client pour placer des ordres NO (stratégie S3).
+Phase 6 — Exécution des ordres réels sur Polymarket CLOB V2
+============================================================
+Utilise py-clob-client-v2 (CLOB V2 lancé le 28 avril 2026).
 
-Flux complet pour un marché S3 :
-  1. signal détecté sur Gamma API (YES entre 5-10%)
-  2. get_no_token_id()    → récupère le token_id du côté NO
-  3. check_liquidity()    → vérifie qu'on peut acheter la quantité voulue
-  4. place_no_order()     → envoie l'ordre FOK (Fill-or-Kill)
-  5. retourne l'order_id  → suivi dans live_portfolio.json
-
-Gestion des erreurs :
-  - token_id absent       → skip marché, log warning
-  - liquidité insuffisante → skip, log warning
-  - ordre rejeté           → skip, log error (pas de retry automatique)
+Changements V1 → V2 :
+  - Package : py-clob-client-v2
+  - Méthode unifiée : create_and_post_market_order() (create + post en un seul appel)
+  - Side enum : Side.BUY au lieu de la string "BUY"
+  - PartialCreateOrderOptions(tick_size="0.01") obligatoire
+  - EIP-712 domain version "2" gérée automatiquement par le SDK
 """
 
-import os, json, time
+import os, json
 from typing import Optional
 from loguru import logger
 
-from py_clob_client.client     import ClobClient
-from py_clob_client.clob_types import MarketOrderArgs, OrderType, AssetType, BalanceAllowanceParams
+from py_clob_client_v2 import (
+    ClobClient,
+    ApiCreds,
+    MarketOrderArgs,
+    OrderType,
+    PartialCreateOrderOptions,
+    Side,
+)
 
 
 # ── Connexion au CLOB ─────────────────────────────────────────────────────────
 
 def build_client() -> ClobClient:
     """
-    Instancie le client CLOB authentifié depuis les variables d'env.
-    Requiert POLYMARKET_PRIVATE_KEY + les 3 clés API dans .env.
-
-    signature_type=1 (POLY_PROXY) : obligatoire quand Polymarket a créé un
-    wallet proxy pour l'utilisateur (dépôt via pUSD relay — cas standard).
-    Sans ce paramètre → order_version_mismatch 400.
-    funder = adresse du wallet proxy (visible sur polymarket.com/wallet).
+    Instancie le client CLOB V2 authentifié depuis les variables d'env.
     """
-    from py_clob_client.clob_types import ApiCreds
-    pk     = os.environ["POLYMARKET_PRIVATE_KEY"]
-    funder = os.environ.get("POLYMARKET_PROXY_WALLET", "").strip() or None
+    pk = os.environ["POLYMARKET_PRIVATE_KEY"]
+    creds = ApiCreds(
+        api_key        = os.environ["POLYMARKET_API_KEY"],
+        api_secret     = os.environ["POLYMARKET_API_SECRET"],
+        api_passphrase = os.environ["POLYMARKET_API_PASSPHRASE"],
+    )
     return ClobClient(
-        host           = "https://clob.polymarket.com",
-        key            = pk,
-        chain_id       = 137,   # Polygon
-        creds          = ApiCreds(
-            api_key        = os.environ["POLYMARKET_API_KEY"],
-            api_secret     = os.environ["POLYMARKET_API_SECRET"],
-            api_passphrase = os.environ["POLYMARKET_API_PASSPHRASE"],
-        ),
-        signature_type = 1,      # POLY_PROXY — wallet proxy Polymarket
-        funder         = funder,
+        host     = "https://clob.polymarket.com",
+        chain_id = 137,
+        key      = pk,
+        creds    = creds,
     )
 
 
 def create_api_keys(private_key: str) -> dict:
-    """
-    Génère les clés API L2 Polymarket à partir de la clé privée du wallet.
-    À appeler une fois lors de la configuration initiale.
-    Retourne {"api_key", "api_secret", "api_passphrase"}.
-    """
+    """Génère les clés API L2 depuis la clé privée. À appeler une seule fois."""
     client = ClobClient(
         host     = "https://clob.polymarket.com",
-        key      = private_key,
         chain_id = 137,
+        key      = private_key,
     )
     creds = client.create_or_derive_api_creds()
     return {
@@ -76,14 +64,8 @@ def create_api_keys(private_key: str) -> dict:
 
 def get_no_token_id(market: dict) -> Optional[str]:
     """
-    Extrait le token_id du côté NO depuis la réponse de l'API Gamma.
-
-    Gamma API retourne :
-      clobTokenIds : ["<yes_token_id>", "<no_token_id>"]
-      outcomes     : ["Yes", "No"]
-
-    On cherche l'index de "No" dans outcomes pour récupérer le bon token.
-    Fallback : index 1 si le format est binaire standard.
+    Extrait le token_id NO depuis la réponse Gamma API.
+    clobTokenIds : ["<yes_token_id>", "<no_token_id>"]
     """
     clob_ids = market.get("clobTokenIds")
     outcomes = market.get("outcomes")
@@ -91,7 +73,6 @@ def get_no_token_id(market: dict) -> Optional[str]:
     if not clob_ids:
         return None
 
-    # Tenter de parser si c'est une chaîne JSON
     if isinstance(clob_ids, str):
         try:
             clob_ids = json.loads(clob_ids)
@@ -104,69 +85,55 @@ def get_no_token_id(market: dict) -> Optional[str]:
         except (json.JSONDecodeError, ValueError):
             outcomes = None
 
-    # Trouver l'index de "No"
     if outcomes and isinstance(outcomes, list):
         for i, o in enumerate(outcomes):
             if str(o).lower() in ("no", "non"):
                 return str(clob_ids[i]) if i < len(clob_ids) else None
 
-    # Fallback binaire : index 1 = NO
     return str(clob_ids[1]) if len(clob_ids) >= 2 else None
 
 
 # ── Vérification de liquidité ─────────────────────────────────────────────────
 
 def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bool:
-    """
-    Vérifie qu'on peut acheter `amount_usdc` de tokens NO au marché.
-    Regarde les asks dans le carnet d'ordres et calcule la profondeur disponible.
-    Retourne True si la liquidité est suffisante.
-    """
+    """Vérifie qu'au moins 50% de la mise est couverte par le carnet d'ordres."""
     try:
         book  = client.get_order_book(token_id)
         asks  = book.asks or []
         total = sum(float(a.size) * float(a.price) for a in asks)
-        if total < amount_usdc * 0.5:   # accepter si ≥ 50% de la mise est couverte
-            logger.warning(f"Liquidité faible : {total:.1f}$ disponible pour {amount_usdc}$ demandés")
+        if total < amount_usdc * 0.5:
+            logger.warning(f"Liquidité faible : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
             return False
         return True
     except Exception as e:
         logger.warning(f"Impossible de lire l'order book : {e}")
-        return True  # laisser passer, l'ordre FOK échouera proprement si pas de liquidité
+        return True
 
 
-# ── Placement d'ordre ─────────────────────────────────────────────────────────
+# ── Placement d'ordre (CLOB V2) ───────────────────────────────────────────────
 
 def place_no_order(client: ClobClient, token_id: str,
                    amount_usdc: float, yes_price: float) -> Optional[dict]:
     """
-    Achète `amount_usdc` de tokens NO sur le marché.
-
-    Pour S3 : YES est à 5-10%, donc NO est à 90-95%.
-    On achète NO → on gagne si l'événement ne se réalise pas (scénario 98%+ des cas).
-
-    Paramètres :
-      token_id   : identifiant du token NO (depuis clobTokenIds[1])
-      amount_usdc: montant à miser en USDC
-      yes_price  : prix YES actuel (0.05-0.10) — utilisé pour logger le contexte
-
-    Retourne le dict de réponse CLOB avec order_id, ou None si échec.
+    Achète amount_usdc de tokens NO via CLOB V2.
+    tick_size="0.01" couvre la quasi-totalité des marchés Polymarket.
     """
-    no_price = round(1.0 - yes_price, 4)
-
     try:
-        order = client.create_market_order(
-            MarketOrderArgs(
+        resp = client.create_and_post_market_order(
+            order_args = MarketOrderArgs(
                 token_id   = token_id,
                 amount     = amount_usdc,
-                side       = "BUY",          # on achète le token NO
-                price      = no_price,       # prix indicatif pour le FOK
-                order_type = OrderType.FOK,  # Fill-or-Kill : exécuté entièrement ou annulé
-            )
+                side       = Side.BUY,
+                order_type = OrderType.FOK,
+            ),
+            options    = PartialCreateOrderOptions(tick_size="0.01"),
+            order_type = OrderType.FOK,
         )
-        resp = client.post_order(order, OrderType.FOK)
-        logger.success(f"  Ordre NO placé : token={token_id[:15]}... | "
-                       f"{amount_usdc}$ @ NO={no_price:.3f} | resp={resp}")
+        no_price = round(1.0 - yes_price, 4)
+        logger.success(
+            f"  Ordre NO placé : token={token_id[:15]}... | "
+            f"{amount_usdc}$ @ NO={no_price:.3f} | resp={resp}"
+        )
         return resp
     except Exception as e:
         logger.error(f"  Ordre échoué (token={token_id[:15]}...) : {e}")
@@ -176,13 +143,10 @@ def place_no_order(client: ClobClient, token_id: str,
 # ── Lecture du solde ──────────────────────────────────────────────────────────
 
 def get_usdc_balance(client: ClobClient) -> float:
-    """Retourne le solde USDC disponible sur le compte Polymarket."""
+    """Retourne le solde pUSD disponible sur le compte Polymarket."""
     try:
-        # AssetType.COLLATERAL = USDC (le token de collatéral dans py-clob-client)
-        bal = client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
-        )
-        return float(bal.get("balance", 0)) / 1e6   # USDC a 6 décimales
+        bal = client.get_balance_allowance(params={"asset_type": "COLLATERAL"})
+        return float(bal.get("balance", 0)) / 1e6
     except Exception as e:
-        logger.warning(f"Solde USDC non récupéré : {e}")
+        logger.warning(f"Solde non récupéré : {e}")
         return 0.0

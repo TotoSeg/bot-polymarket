@@ -30,18 +30,26 @@ def build_client() -> ClobClient:
     """
     Instancie le client CLOB authentifié depuis les variables d'env.
     Requiert POLYMARKET_PRIVATE_KEY + les 3 clés API dans .env.
+
+    signature_type=1 (POLY_PROXY) : obligatoire quand Polymarket a créé un
+    wallet proxy pour l'utilisateur (dépôt via pUSD relay — cas standard).
+    Sans ce paramètre → order_version_mismatch 400.
+    funder = adresse du wallet proxy (visible sur polymarket.com/wallet).
     """
     from py_clob_client.clob_types import ApiCreds
-    pk = os.environ["POLYMARKET_PRIVATE_KEY"]
+    pk     = os.environ["POLYMARKET_PRIVATE_KEY"]
+    funder = os.environ.get("POLYMARKET_PROXY_WALLET", "").strip() or None
     return ClobClient(
-        host     = "https://clob.polymarket.com",
-        key      = pk,
-        chain_id = 137,   # Polygon
-        creds    = ApiCreds(
+        host           = "https://clob.polymarket.com",
+        key            = pk,
+        chain_id       = 137,   # Polygon
+        creds          = ApiCreds(
             api_key        = os.environ["POLYMARKET_API_KEY"],
             api_secret     = os.environ["POLYMARKET_API_SECRET"],
             api_passphrase = os.environ["POLYMARKET_API_PASSPHRASE"],
         ),
+        signature_type = 1,      # POLY_PROXY — wallet proxy Polymarket
+        funder         = funder,
     )
 
 

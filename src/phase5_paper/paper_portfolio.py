@@ -78,11 +78,16 @@ def load_portfolio(path: Path) -> dict:
     """Charge le portefeuille depuis le fichier JSON (crée un neuf si absent)."""
     if path.exists():
         with open(path, encoding="utf-8") as f:
-            return json.load(f)
+            p = json.load(f)
+        # Migration : ajouter total_depose si absent (anciens portfolios)
+        if "total_depose" not in p:
+            p["total_depose"] = p["capital_initial"]
+        return p
     # Nouveau portefeuille vierge
     return {
         "capital_initial":    1000.0,
         "capital_disponible": 1000.0,
+        "total_depose":       1000.0,  # cumul de tous les dépôts externes
         "positions_ouvertes": {},
         "trades_clos":        [],
     }
@@ -206,15 +211,19 @@ def print_summary(portfolio: dict):
     nb_total = len(clos)
     wr       = nb_wins / nb_total * 100 if nb_total > 0 else 0
 
+    # ROI basé sur le total des dépôts (pas seulement le capital initial)
+    total_depose = portfolio.get("total_depose", capital_init)
+    roi_pct = (capital_total - total_depose) / total_depose * 100 if total_depose > 0 else 0
+
     logger.info("\n" + "=" * 60)
-    logger.info("PORTEFEUILLE PAPER TRADING")
+    logger.info("PORTEFEUILLE LIVE")
     logger.info("=" * 60)
-    logger.info(f"  Capital initial     : {capital_init:>10.2f}$")
+    logger.info(f"  Total verse         : {total_depose:>10.2f}$")
     logger.info(f"  Capital total       : {capital_total:>10.2f}$")
     logger.info(f"  Capital disponible  : {capital_dispo:>10.2f}$")
     logger.info(f"  Capital engage      : {capital_engage:>10.2f}$ ({len(ouvert)} positions)")
     logger.info(f"  P&L realise         : {pnl_clos:>+10.2f}$")
-    logger.info(f"  Rendement           : {(capital_total-capital_init)/capital_init*100:>+9.2f}%")
+    logger.info(f"  ROI (sur versements): {roi_pct:>+9.2f}%")
     logger.info(f"  Trades clos         : {nb_total:>10,}")
     logger.info(f"  Win rate            : {wr:>9.1f}%")
 

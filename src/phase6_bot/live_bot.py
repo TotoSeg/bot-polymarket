@@ -78,17 +78,10 @@ def run_once(dry_run: bool = False):
                 f"{'[DRY-RUN]' if dry_run else '[REEL]'}")
     logger.info("=" * 60)
 
-    # ── Synchroniser le capital avec le vrai solde wallet ────────────────────
-    # En mode réel : on lit le solde USDC sur la blockchain et on met à jour
-    # capital_disponible. Ainsi, tout dépôt ou retrait manuel est pris en compte
-    # automatiquement, sans avoir à modifier INITIAL_CAPITAL_USDC dans .env.
-    if not dry_run and client:
-        real_balance = get_usdc_balance(client)
-        if real_balance > 0:
-            portfolio["capital_disponible"] = round(real_balance, 2)
-            logger.info(f"Solde USDC wallet (synchro) : {real_balance:.2f} USDC")
-
     # ── 1. Résoudre les positions ouvertes ────────────────────────────────────
+    # On ferme d'abord (avant la synchro wallet) pour que capital_disponible
+    # intègre les gains/pertes du cycle → le différentiel avec le vrai solde
+    # wallet ne reflétera que les dépôts externes, pas les profits.
     nb_closed = 0
     for mid in list(portfolio["positions_ouvertes"].keys()):
         market = get_market(mid)
@@ -101,6 +94,25 @@ def run_once(dry_run: bool = False):
         nb_closed += 1
         time.sleep(0.1)
     logger.info(f"Positions fermées ce cycle : {nb_closed}")
+
+    # ── Synchroniser le capital avec le vrai solde wallet ────────────────────
+    # On compare le vrai solde USDC avec ce que la comptabilité interne attendait.
+    # Tout excédent = dépôt externe → cumulé dans total_depose pour un ROI exact.
+    if not dry_run and client:
+        real_balance = get_usdc_balance(client)
+        if real_balance > 0:
+            delta = round(real_balance - portfolio["capital_disponible"], 2)
+            if delta > 1.0:
+                # Dépôt externe détecté (seuil 1 USDC pour ignorer les arrondis)
+                portfolio["total_depose"] = round(
+                    portfolio.get("total_depose", portfolio["capital_initial"]) + delta, 2
+                )
+                logger.info(f"Dépôt détecté : +{delta:.2f} USDC "
+                            f"(total versé : {portfolio['total_depose']:.2f} USDC)")
+            elif delta < -1.0:
+                logger.warning(f"Retrait ou écart détecté : {delta:.2f} USDC")
+            portfolio["capital_disponible"] = round(real_balance, 2)
+            logger.info(f"Solde USDC wallet : {real_balance:.2f} USDC")
 
     # ── 2. Scanner les marchés S3 + SP ────────────────────────────────────────
     # SP couvre jusqu'à YES=35%, donc on scanne jusqu'à 0.35

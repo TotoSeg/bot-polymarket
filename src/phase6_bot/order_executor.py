@@ -170,8 +170,9 @@ def place_no_order(client: ClobClient, token_id: str,
 def get_usdc_balance(client: ClobClient) -> float:
     """Retourne le solde USDC disponible sur le compte Polymarket."""
     try:
+        # AssetType.COLLATERAL = USDC (le token de collatéral dans py-clob-client)
         bal = client.get_balance_allowance(
-            BalanceAllowanceParams(asset_type=AssetType.USDC)
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
         return float(bal.get("balance", 0)) / 1e6   # USDC a 6 décimales
     except Exception as e:

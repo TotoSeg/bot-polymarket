@@ -49,11 +49,8 @@ KELLY_FRACTION = 0.25
 MAX_BET_PCT    = 0.05   # 5% du capital initial max par trade (↓ de 10%)
                          # → permet ~20 positions simultanées au lieu de 10
 
-# Nb max de positions par stratégie (évite sur-concentration)
-MAX_POSITIONS_PER_STRATEGY = {
-    "S3": 15,   # YES 5-10% tous marchés
-    "SP": 10,   # YES 5-35% politique/géopo (plus de variance → limite réduite)
-}
+# Pas de limite de positions par stratégie — le capital disponible est le seul frein
+MAX_POSITIONS_PER_STRATEGY = {}
 
 
 def _kelly_size(win_rate: float, p_yes: float, initial_capital: float) -> float:
@@ -120,7 +117,7 @@ def add_position(portfolio: dict, market: dict, strategy: str,
         1 for p in portfolio["positions_ouvertes"].values()
         if p["strategy"] == strategy
     )
-    max_strat = MAX_POSITIONS_PER_STRATEGY.get(strategy, 10)
+    max_strat = MAX_POSITIONS_PER_STRATEGY.get(strategy, 999)
     if nb_open_strat >= max_strat:
         logger.debug(f"Limite {strategy} atteinte ({nb_open_strat}/{max_strat})")
         return False

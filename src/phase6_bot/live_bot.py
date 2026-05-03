@@ -78,10 +78,15 @@ def run_once(dry_run: bool = False):
                 f"{'[DRY-RUN]' if dry_run else '[REEL]'}")
     logger.info("=" * 60)
 
-    # ── Afficher le solde réel ────────────────────────────────────────────────
+    # ── Synchroniser le capital avec le vrai solde wallet ────────────────────
+    # En mode réel : on lit le solde USDC sur la blockchain et on met à jour
+    # capital_disponible. Ainsi, tout dépôt ou retrait manuel est pris en compte
+    # automatiquement, sans avoir à modifier INITIAL_CAPITAL_USDC dans .env.
     if not dry_run and client:
-        balance = get_usdc_balance(client)
-        logger.info(f"Solde USDC wallet : {balance:.2f} USDC")
+        real_balance = get_usdc_balance(client)
+        if real_balance > 0:
+            portfolio["capital_disponible"] = round(real_balance, 2)
+            logger.info(f"Solde USDC wallet (synchro) : {real_balance:.2f} USDC")
 
     # ── 1. Résoudre les positions ouvertes ────────────────────────────────────
     nb_closed = 0
@@ -106,6 +111,14 @@ def run_once(dry_run: bool = False):
     max_bet  = float(os.getenv("MAX_BET_USDC", "25"))
     nb_new   = 0
     skipped  = 0
+
+    # Capital total = disponible + déjà engagé dans les positions ouvertes.
+    # C'est cette base qui alimente le Kelly pour que les mises croissent
+    # automatiquement avec les profits (effet composé) ou s'adaptent aux dépôts.
+    capital_commit = sum(p["bet_amount"] for p in portfolio["positions_ouvertes"].values())
+    capital_kelly  = portfolio["capital_disponible"] + capital_commit
+    logger.info(f"Capital Kelly : {capital_kelly:.2f}$ "
+                f"(dispo {portfolio['capital_disponible']:.2f}$ + engagé {capital_commit:.2f}$)")
 
     # Collecter tous les signaux S3 et SP
     # Tri : résolution la plus proche d'abord (P&L composé plus rapide),
@@ -152,9 +165,10 @@ def run_once(dry_run: bool = False):
         ):
             continue
 
-        # Calculer la mise Kelly (plafonnée à MAX_BET_USDC)
+        # Calculer la mise Kelly sur le capital total courant (pas le capital initial)
+        # → les mises s'adaptent automatiquement aux dépôts et aux profits composés
         bet = min(
-            _kelly_size(sig["win_rate_prior"], yp, portfolio["capital_initial"]),
+            _kelly_size(sig["win_rate_prior"], yp, capital_kelly),
             max_bet,
         )
         if bet <= 0 or bet > portfolio["capital_disponible"]:
@@ -172,7 +186,10 @@ def run_once(dry_run: bool = False):
             end_str = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "???"
             logger.info(f"  [DRY-RUN] {strategy:3s} | {end_str} | {m.get('question','')[:45]:45s} | "
                         f"YES={yp:.3f} | Mise={bet:.2f}$")
-            add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"])
+            # Passer le bet pré-calculé pour éviter que add_position le recalcule
+            # sur capital_initial (qui est le dépôt de départ, pas le capital courant)
+            add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
+                         bet_amount=bet)
             nb_new += 1
         else:
             if not check_liquidity(client, no_token, bet):
@@ -181,7 +198,8 @@ def run_once(dry_run: bool = False):
             resp = place_no_order(client, no_token, bet, yp)
             if resp:
                 m["_order_id"] = resp.get("orderID", "")
-                add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"])
+                add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
+                             bet_amount=bet)
                 nb_new += 1
             else:
                 skipped += 1

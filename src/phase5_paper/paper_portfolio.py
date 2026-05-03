@@ -95,9 +95,14 @@ def save_portfolio(portfolio: dict, path: Path):
 
 
 def add_position(portfolio: dict, market: dict, strategy: str,
-                 win_rate_prior: float, entry_price_yes: float, reason: str):
+                 win_rate_prior: float, entry_price_yes: float, reason: str,
+                 bet_amount: float = None):
     """
     Enregistre une nouvelle position ouverte.
+
+    bet_amount : si fourni, utilise ce montant directement (déjà calculé par
+                 l'appelant avec le capital courant réel). Sinon, recalcule
+                 via Kelly sur capital_initial (usage paper trading).
 
     Retourne True si la position a été ajoutée, False si déjà présente.
     """
@@ -115,8 +120,9 @@ def add_position(portfolio: dict, market: dict, strategy: str,
         logger.debug(f"Limite {strategy} atteinte ({nb_open_strat}/{max_strat})")
         return False
 
-    initial_capital = portfolio["capital_initial"]
-    bet_amount = _kelly_size(win_rate_prior, entry_price_yes, initial_capital)
+    # Utiliser le montant pré-calculé si fourni, sinon calculer sur capital_initial
+    if bet_amount is None:
+        bet_amount = _kelly_size(win_rate_prior, entry_price_yes, portfolio["capital_initial"])
 
     # Ne pas ouvrir si capital insuffisant
     if bet_amount > portfolio["capital_disponible"]:

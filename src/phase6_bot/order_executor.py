@@ -22,6 +22,8 @@ from py_clob_client_v2 import (
     OrderType,
     PartialCreateOrderOptions,
     Side,
+    AssetType,
+    BalanceAllowanceParams,
 )
 
 
@@ -156,7 +158,9 @@ def place_no_order(client: ClobClient, token_id: str,
 def get_usdc_balance(client: ClobClient) -> float:
     """Retourne le solde pUSD disponible sur le compte Polymarket."""
     try:
-        bal = client.get_balance_allowance(asset_type="COLLATERAL")
+        bal = client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
         return float(bal.get("balance", 0)) / 1e6
     except Exception as e:
         logger.warning(f"Solde non récupéré : {e}")

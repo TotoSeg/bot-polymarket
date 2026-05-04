@@ -47,7 +47,7 @@ def build_client() -> ClobClient:
         chain_id       = 137,
         key            = pk,
         creds          = creds,
-        signature_type = 2,      # GNOSIS_SAFE — MetaMask + proxy Polymarket
+        signature_type = 1,      # POLY_PROXY — wallet proxy pUSD Polymarket
         funder         = funder,
     )
 

@@ -131,6 +131,9 @@ def place_no_order(client: ClobClient, token_id: str,
     Achète amount_usdc de tokens NO via CLOB V2.
     tick_size="0.01" couvre la quasi-totalité des marchés Polymarket.
     """
+    no_price = min(round(1.0 - yes_price, 4), 0.99)  # CLOB max price = 0.99
+    amount_usdc = max(round(amount_usdc, 2), 1.0)    # CLOB min order = $1
+
     try:
         resp = client.create_and_post_market_order(
             order_args = MarketOrderArgs(
@@ -142,7 +145,6 @@ def place_no_order(client: ClobClient, token_id: str,
             options    = PartialCreateOrderOptions(tick_size="0.01"),
             order_type = OrderType.FOK,
         )
-        no_price = round(1.0 - yes_price, 4)
         logger.success(
             f"  Ordre NO placé : token={token_id[:15]}... | "
             f"{amount_usdc}$ @ NO={no_price:.3f} | resp={resp}"

@@ -330,34 +330,49 @@ def run_once(dry_run: bool = False):
 
 def run_cleanup(dry_run: bool = False):
     """
-    Règle 5 : ferme toutes les positions qui :
-      - Ne satisfont pas la règle 1 (gain attendu < 5%)
-      - ET se résolvent après le 31/05/2026
-    Tente de vendre les tokens NO sur le CLOB. Si impossible, affiche un avertissement.
-    Le capital libéré sera redéployé lors du prochain cycle normal.
+    Ferme toutes les positions qui satisfont AU MOINS UNE condition :
+      1. EV < 5% calculé sur le PRIX ACTUEL du marché (pas le prix d'entrée)
+      2. Résolution après le 31/05/2026
+      3. Prix YES actuel > 95% (marché en train de se résoudre YES — on perd)
+
+    Tente de vendre les tokens NO sur le CLOB (min_price=0 pour forcer la vente).
+    Si la vente échoue (pas de liquidité), signale la position pour clôture manuelle.
     """
     portfolio = load_portfolio(PORTFOLIO_FILE)
     client    = None if dry_run else build_client()
     cutoff    = datetime(2026, 5, 31, 23, 59, 59, tzinfo=timezone.utc)
 
     logger.info("=" * 60)
-    logger.info(f"CLEANUP – Fermeture des positions hors règles (> 31/05/2026 + EV<5%)")
+    logger.info("CLEANUP – Fermeture des positions hors règles")
+    logger.info("Critères : EV<5% (prix actuel) OU résolution>31/05 OU YES>95%")
     logger.info("=" * 60)
 
-    to_close = []
-    for mid, pos in portfolio["positions_ouvertes"].items():
-        # Calculer le gain attendu avec les paramètres d'entrée
-        ev = calc_expected_gain_pct(pos["win_rate_prior"], pos["entry_price_yes"])
+    to_close   = []
+    manual_close = []   # positions sans liquidité à fermer manuellement
 
-        # Récupérer la date de résolution depuis le marché actuel
+    for mid, pos in list(portfolio["positions_ouvertes"].items()):
         market = get_market(mid)
         if market is None:
             logger.warning(f"  Marché introuvable : {mid[:12]}...")
             continue
-        end_dt = parse_end_date(market)
 
-        if ev < MIN_EXPECTED_GAIN_PCT or end_dt > cutoff:
-            to_close.append((mid, pos, market, ev, end_dt))
+        # Prix YES ACTUEL (et non le prix d'entrée)
+        current_yp = parse_yes_price(market) or pos["entry_price_yes"]
+        end_dt     = parse_end_date(market)
+
+        # EV calculé sur le prix actuel du marché
+        ev_current = calc_expected_gain_pct(pos["win_rate_prior"], current_yp)
+
+        reason = []
+        if ev_current < MIN_EXPECTED_GAIN_PCT:
+            reason.append(f"EV={ev_current*100:.1f}%<5%")
+        if end_dt > cutoff:
+            reason.append(f"résolution={end_dt.strftime('%Y-%m-%d')}>31/05")
+        if current_yp > 0.95:
+            reason.append(f"YES={current_yp:.2f}>95% (position perdante)")
+
+        if reason:
+            to_close.append((mid, pos, market, ev_current, end_dt, " | ".join(reason)))
 
     if not to_close:
         logger.info("Aucune position à fermer selon les critères de cleanup.")
@@ -368,10 +383,11 @@ def run_cleanup(dry_run: bool = False):
     nb_sold = 0
     nb_failed = 0
 
-    for mid, pos, market, ev, end_dt in to_close:
+    for mid, pos, market, ev, end_dt, reason_str in to_close:
         question = pos.get("question", "")[:60]
-        end_str  = end_dt.strftime("%Y-%m-%d")
-        logger.info(f"  {question} | EV={ev*100:.1f}% | Résolution={end_str}")
+        end_str  = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "???"
+        logger.info(f"  {question}")
+        logger.info(f"    Raison : {reason_str} | Résolution={end_str}")
 
         if dry_run:
             logger.info(f"    [DRY-RUN] Serait vendu")
@@ -379,15 +395,14 @@ def run_cleanup(dry_run: bool = False):
 
         no_token = get_no_token_id(market)
         if not no_token:
-            logger.warning(f"    Pas de token NO pour {mid[:12]}...")
+            logger.warning(f"    Pas de token NO pour {mid[:12]}... → fermeture manuelle requise sur polymarket.com")
             nb_failed += 1
             continue
 
         entry_no_price = 1.0 - pos["entry_price_yes"]
         tokens_held    = pos["bet_amount"] / max(entry_no_price, 0.001)
 
-        # Pour le cleanup, on accepte de vendre même à perte pour libérer le capital.
-        # On passe min_price=0 pour accepter n'importe quelle offre du marché.
+        # Vendre au meilleur prix disponible (min_price=0 = accepter toute offre)
         resp = sell_no_position(client, no_token, tokens_held, min_price=0.0)
         if resp:
             sale_price = float(resp.get("price", entry_no_price))
@@ -403,7 +418,9 @@ def run_cleanup(dry_run: bool = False):
         time.sleep(0.5)
 
     save_portfolio(portfolio, PORTFOLIO_FILE)
-    logger.info(f"Cleanup terminé : {nb_sold} fermées, {nb_failed} échouées.")
+    logger.info(f"Cleanup terminé : {nb_sold} fermées, {nb_failed} échecs.")
+    if nb_failed:
+        logger.warning(f"  {nb_failed} position(s) sans liquidité → fermer manuellement sur polymarket.com")
     logger.info("Le capital libéré sera redéployé au prochain cycle --loop.")
 
 

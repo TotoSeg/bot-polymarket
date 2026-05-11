@@ -5,22 +5,20 @@ Met à jour une base de données Notion avec les positions ouvertes du bot.
 Appelé toutes les 30 minutes par live_bot.py en mode --loop.
 
 Configuration requise dans .env :
-    NOTION_TOKEN       : clé d'intégration Notion (secret_xxx)
-    NOTION_DATABASE_ID : ID de la base de données Notion cible
+    NOTION_TOKEN       : token d'intégration Notion (ntn_... ou secret_...)
+    NOTION_DATABASE_ID : ID de la base de données Notion cible (32 hex chars)
 
-Structure de la base Notion (à créer manuellement) :
-    Titre        → Title      (question du marché)
-    Taille ($)   → Number     (mise en USDC)
-    Gain espéré  → Number     (gain attendu en $ si résolution favorable)
-    Résolution   → Date       (date de résolution du marché)
-    Stratégie    → Select     (S3 ou SP)
-    YES entrée   → Number     (prix YES au moment de l'entrée)
-    market_id    → Rich text  (identifiant interne, pour upsert)
+Colonnes Notion à créer (noms exacts) :
+    Titre          → Title      (question du marché)
+    Mise ($)       → Number     (USDC investi à l'entrée)
+    Gain espéré ($)→ Number     (EV en $ si NO gagne)
+    Résolution     → Date       (date de clôture du marché — colonne de tri)
+    Stratégie      → Select     (S3 ou SP)
+    YES entrée     → Number     (prix YES au moment de l'entrée)
+    market_id      → Text       (identifiant interne, pour upsert)
 
-Le reporter lit live_portfolio.json, synchronise la base Notion :
-  - Crée les pages manquantes
-  - Met à jour les pages existantes (via market_id)
-  - Archive les pages dont les positions sont fermées
+Note : "Mise ($)" = USDC investi par le bot. Polymarket affiche le payout
+potentiel (tokens × 1$) qui est supérieur à la mise car NO < 1$.
 """
 
 import os
@@ -31,15 +29,42 @@ from pathlib import Path
 from typing import Optional
 from loguru import logger
 
-# Frais Polymarket (pour calculer le gain net espéré)
 POLYMARKET_FEE = 0.02
-
 NOTION_API_URL = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
-# Fichier local qui mémorise les market_id → page_id Notion
-# Évite de requêter toute la DB à chaque run (rate limit)
-_CACHE_FILE = Path(__file__).resolve().parents[2] / "outputs" / "phase6" / "notion_page_ids.json"
+_CACHE_FILE     = Path(__file__).resolve().parents[2] / "outputs" / "phase6" / "notion_page_ids.json"
+_PORTFOLIO_FILE = Path(__file__).resolve().parents[2] / "outputs" / "phase6" / "live_portfolio.json"
+
+
+# ── Helpers internes ─────────────────────────────────────────────────────────
+
+def _parse_end_date_local(m: dict) -> Optional[str]:
+    """Extrait la date de résolution d'un marché et retourne 'YYYY-MM-DD' ou None."""
+    raw = m.get("endDate") or m.get("end_date_iso") or ""
+    if not raw:
+        return None
+    try:
+        raw = raw.rstrip("Z").replace("Z", "+00:00")
+        dt  = datetime.fromisoformat(raw + ("T00:00:00" if "T" not in raw else ""))
+        if dt.year >= 9999:
+            return None
+        return dt.strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def _expected_gain_usd(pos: dict) -> float:
+    """Gain espéré en $ = mise × EV."""
+    bet      = pos.get("bet_amount", 0.0)
+    wr       = pos.get("win_rate_prior", 0.97)
+    yes_p    = pos.get("entry_price_yes", 0.07)
+    no_p     = 1.0 - yes_p
+    if no_p <= 0 or bet <= 0:
+        return 0.0
+    gain_win = (yes_p / no_p) * (1.0 - POLYMARKET_FEE)
+    ev       = wr * gain_win - (1.0 - wr) * 1.0
+    return round(bet * ev, 2)
 
 
 def _headers() -> dict:
@@ -47,24 +72,22 @@ def _headers() -> dict:
     if not token:
         raise EnvironmentError("NOTION_TOKEN manquant dans .env")
     return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type":  "application/json",
+        "Authorization":  f"Bearer {token}",
+        "Content-Type":   "application/json",
         "Notion-Version": NOTION_VERSION,
     }
 
 
 def _db_id() -> str:
-    db = os.environ.get("NOTION_DATABASE_ID", "")
+    db = os.environ.get("NOTION_DATABASE_ID", "").replace("-", "")
     if not db:
         raise EnvironmentError("NOTION_DATABASE_ID manquant dans .env")
-    # Normaliser : retirer les tirets si l'ID est au format UUID sans tirets
-    return db.replace("-", "")
+    return db
 
 
-# ── Cache local page_id ──────────────────────────────────────────────────────
+# ── Cache page_id ────────────────────────────────────────────────────────────
 
 def _load_cache() -> dict:
-    """Charge le mapping market_id → notion_page_id depuis le cache local."""
     if _CACHE_FILE.exists():
         try:
             return json.loads(_CACHE_FILE.read_text(encoding="utf-8"))
@@ -78,51 +101,67 @@ def _save_cache(cache: dict):
     _CACHE_FILE.write_text(json.dumps(cache, indent=2), encoding="utf-8")
 
 
-# ── Calcul du gain espéré ────────────────────────────────────────────────────
+# ── Enrichissement des dates de résolution ───────────────────────────────────
 
-def _expected_gain_usd(pos: dict) -> float:
+def _enrich_resolution_dates(portfolio: dict) -> bool:
     """
-    Gain espéré en $ si la position se résout favorablement (NO gagne).
-    = mise × win_rate × (yes_price / no_price) × (1 − frais) − mise × (1 − win_rate)
+    Tente de remplir `resolution_date` pour les positions qui ne l'ont pas encore.
+    Interroge l'API Polymarket et sauvegarde le portfolio enrichi.
+    Retourne True si au moins une date a été ajoutée.
     """
-    bet       = pos.get("bet_amount", 0.0)
-    win_rate  = pos.get("win_rate_prior", 0.97)
-    yes_price = pos.get("entry_price_yes", 0.07)
-    no_price  = 1.0 - yes_price
-    if no_price <= 0 or bet <= 0:
-        return 0.0
-    gain_if_win = (yes_price / no_price) * (1.0 - POLYMARKET_FEE)
-    ev_pct      = win_rate * gain_if_win - (1.0 - win_rate) * 1.0
-    return round(bet * ev_pct, 2)
+    try:
+        from src.phase5_paper.polymarket_client import get_market
+    except ImportError:
+        return False
+
+    changed = False
+    for mid, pos in portfolio.get("positions_ouvertes", {}).items():
+        if "resolution_date" not in pos:
+            try:
+                market = get_market(mid)
+                if market:
+                    date_str = _parse_end_date_local(market)
+                    if date_str:
+                        pos["resolution_date"] = date_str
+                        changed = True
+            except Exception:
+                pass
+
+    if changed:
+        # Persister les dates enrichies dans le fichier portfolio
+        try:
+            import json as _json
+            _PORTFOLIO_FILE.write_text(
+                _json.dumps(portfolio, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    return changed
 
 
 # ── CRUD Notion ───────────────────────────────────────────────────────────────
 
 def _build_page_properties(pos: dict, market_id: str) -> dict:
-    """Construit le dict de propriétés Notion pour une position."""
-    question         = pos.get("question", "")[:100]
-    bet_amount       = pos.get("bet_amount", 0.0)
-    gain_espere      = _expected_gain_usd(pos)
-    strategy         = pos.get("strategy", "")
-    yes_price        = pos.get("entry_price_yes", 0.0)
-    resolution_date  = pos.get("resolution_date", "")   # format "YYYY-MM-DD"
+    question        = pos.get("question", "")[:100]
+    bet_amount      = pos.get("bet_amount", 0.0)
+    gain_espere     = _expected_gain_usd(pos)
+    strategy        = pos.get("strategy", "")
+    yes_price       = pos.get("entry_price_yes", 0.0)
+    resolution_date = pos.get("resolution_date", "")
 
     props = {
         "Titre": {
             "title": [{"type": "text", "text": {"content": question}}]
         },
-        "Taille ($)": {
+        "Mise ($)": {
             "number": round(bet_amount, 2)
         },
         "Gain espéré ($)": {
             "number": gain_espere
         },
-        "Résolution": {
-            # Notion attend un objet date avec "start" en ISO 8601
-            "date": {"start": resolution_date} if resolution_date else None
-        },
         "Stratégie": {
-            "select": {"name": strategy}
+            "select": {"name": strategy} if strategy else None
         },
         "YES entrée": {
             "number": round(yes_price, 4)
@@ -131,76 +170,46 @@ def _build_page_properties(pos: dict, market_id: str) -> dict:
             "rich_text": [{"type": "text", "text": {"content": market_id}}]
         },
     }
-    # Notion rejette les propriétés date avec value None → les retirer si absentes
-    if not resolution_date:
-        del props["Résolution"]
-    return props
+
+    if resolution_date:
+        props["Résolution"] = {"date": {"start": resolution_date}}
+
+    # Retirer les propriétés avec valeur None (Notion rejette null dans select)
+    return {k: v for k, v in props.items() if v is not None}
 
 
 def _create_page(market_id: str, pos: dict) -> Optional[str]:
-    """Crée une nouvelle page dans la base Notion. Retourne le page_id."""
-    db = _db_id()
-    props = _build_page_properties(pos, market_id)
     payload = {
-        "parent": {"database_id": db},
-        "properties": props,
+        "parent":     {"database_id": _db_id()},
+        "properties": _build_page_properties(pos, market_id),
     }
     try:
         r = requests.post(f"{NOTION_API_URL}/pages", headers=_headers(),
                           json=payload, timeout=10)
         r.raise_for_status()
-        page_id = r.json().get("id", "")
-        logger.debug(f"  Notion page créée : {market_id[:12]}... → {page_id[:8]}...")
-        return page_id
+        return r.json().get("id", "")
     except Exception as e:
-        logger.warning(f"  Notion create échoué ({market_id[:12]}...) : {e}")
+        logger.warning(f"  Notion create échoué ({market_id[:8]}...) : {e}")
         return None
 
 
 def _update_page(page_id: str, market_id: str, pos: dict):
-    """Met à jour une page Notion existante."""
-    props = _build_page_properties(pos, market_id)
-    payload = {"properties": props}
+    payload = {"properties": _build_page_properties(pos, market_id)}
     try:
         r = requests.patch(f"{NOTION_API_URL}/pages/{page_id}", headers=_headers(),
                            json=payload, timeout=10)
         r.raise_for_status()
     except Exception as e:
-        logger.warning(f"  Notion update échoué (page {page_id[:8]}...) : {e}")
+        logger.warning(f"  Notion update échoué ({page_id[:8]}...) : {e}")
 
 
 def _archive_page(page_id: str):
-    """Archive (supprime logiquement) une page Notion."""
     try:
         r = requests.patch(f"{NOTION_API_URL}/pages/{page_id}", headers=_headers(),
                            json={"archived": True}, timeout=10)
         r.raise_for_status()
     except Exception as e:
-        logger.warning(f"  Notion archive échoué (page {page_id[:8]}...) : {e}")
-
-
-def _add_resolution_date_to_portfolio(portfolio: dict):
-    """
-    Tente d'ajouter la date de résolution aux positions si elle manque.
-    (Enrichissement optionnel – ne bloque pas si l'API est lente.)
-    """
-    # Import ici pour éviter les dépendances circulaires
-    try:
-        from src.phase5_paper.polymarket_client import get_market
-        from src.phase6_bot.live_bot import parse_end_date
-    except ImportError:
-        return
-
-    for mid, pos in portfolio.get("positions_ouvertes", {}).items():
-        if "resolution_date" not in pos:
-            try:
-                market = get_market(mid)
-                if market:
-                    end_dt = parse_end_date(market)
-                    if end_dt.year != 9999:
-                        pos["resolution_date"] = end_dt.strftime("%Y-%m-%d")
-            except Exception:
-                pass
+        logger.warning(f"  Notion archive échoué ({page_id[:8]}...) : {e}")
 
 
 # ── Fonction principale ───────────────────────────────────────────────────────
@@ -208,35 +217,23 @@ def _add_resolution_date_to_portfolio(portfolio: dict):
 def update_notion_report(portfolio: dict):
     """
     Synchronise la base Notion avec les positions ouvertes du portfolio.
-
-    Algorithme :
-      1. Charger le cache local market_id → page_id
-      2. Pour chaque position ouverte : créer ou mettre à jour la page
-      3. Archiver les pages dont la position est fermée
-      4. Sauvegarder le cache mis à jour
-
-    Les pages sont créées avec les propriétés définies dans _build_page_properties().
-    Le tri par date de résolution doit être configuré dans la vue Notion (une seule fois).
+    Crée/met à jour les pages existantes, archive les positions fermées.
     """
-    # Vérifier que les variables d'env sont présentes
     if not os.environ.get("NOTION_TOKEN") or not os.environ.get("NOTION_DATABASE_ID"):
-        logger.debug("NOTION_TOKEN ou NOTION_DATABASE_ID absent – reporting Notion désactivé")
+        logger.debug("Notion désactivé (NOTION_TOKEN ou NOTION_DATABASE_ID absent)")
         return
 
     try:
-        _add_resolution_date_to_portfolio(portfolio)
+        # Enrichir les dates manquantes (positions ouvertes avant la maj du bot)
+        _enrich_resolution_dates(portfolio)
 
-        cache        = _load_cache()
-        open_ids     = set(portfolio.get("positions_ouvertes", {}).keys())
-        cached_ids   = set(cache.keys())
+        cache       = _load_cache()
+        open_ids    = set(portfolio.get("positions_ouvertes", {}).keys())
+        cached_ids  = set(cache.keys())
 
-        nb_created = 0
-        nb_updated = 0
-        nb_archived = 0
+        nb_created = nb_updated = nb_archived = 0
 
-        # Créer ou mettre à jour les positions ouvertes
         for mid, pos in portfolio.get("positions_ouvertes", {}).items():
-            # Ajouter la date de résolution dans les propriétés si disponible
             if mid in cache:
                 _update_page(cache[mid], mid, pos)
                 nb_updated += 1
@@ -246,10 +243,8 @@ def update_notion_report(portfolio: dict):
                     cache[mid] = page_id
                     nb_created += 1
 
-        # Archiver les pages dont la position est maintenant fermée
         for mid in cached_ids - open_ids:
-            _archive_page(cache[mid])
-            del cache[mid]
+            _archive_page(cache.pop(mid))
             nb_archived += 1
 
         _save_cache(cache)

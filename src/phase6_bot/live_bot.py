@@ -331,9 +331,8 @@ def run_once(dry_run: bool = False):
 def run_cleanup(dry_run: bool = False):
     """
     Ferme toutes les positions qui satisfont AU MOINS UNE condition :
-      1. EV < 5% calculé sur le PRIX ACTUEL du marché (pas le prix d'entrée)
+      1. EV < 5% calculé sur le PRIX D'ENTRÉE
       2. Résolution après le 31/05/2026
-      3. Prix YES actuel > 95% (marché en train de se résoudre YES — on perd)
 
     Tente de vendre les tokens NO sur le CLOB (min_price=0 pour forcer la vente).
     Si la vente échoue (pas de liquidité), signale la position pour clôture manuelle.
@@ -344,7 +343,7 @@ def run_cleanup(dry_run: bool = False):
 
     logger.info("=" * 60)
     logger.info("CLEANUP – Fermeture des positions hors règles")
-    logger.info("Critères : EV<5% (prix actuel) OU résolution>31/05 OU YES>95%")
+    logger.info("Critères : EV<5% (prix d'entrée) OU résolution>31/05")
     logger.info("=" * 60)
 
     to_close   = []
@@ -356,23 +355,18 @@ def run_cleanup(dry_run: bool = False):
             logger.warning(f"  Marché introuvable : {mid[:12]}...")
             continue
 
-        # Prix YES ACTUEL (et non le prix d'entrée)
-        current_yp = parse_yes_price(market) or pos["entry_price_yes"]
-        end_dt     = parse_end_date(market)
-
-        # EV calculé sur le prix actuel du marché
-        ev_current = calc_expected_gain_pct(pos["win_rate_prior"], current_yp)
+        # EV calculé sur le prix d'entrée (stratégie d'origine)
+        ev     = calc_expected_gain_pct(pos["win_rate_prior"], pos["entry_price_yes"])
+        end_dt = parse_end_date(market)
 
         reason = []
-        if ev_current < MIN_EXPECTED_GAIN_PCT:
-            reason.append(f"EV={ev_current*100:.1f}%<5%")
+        if ev < MIN_EXPECTED_GAIN_PCT:
+            reason.append(f"EV={ev*100:.1f}%<5%")
         if end_dt > cutoff:
             reason.append(f"résolution={end_dt.strftime('%Y-%m-%d')}>31/05")
-        if current_yp > 0.95:
-            reason.append(f"YES={current_yp:.2f}>95% (position perdante)")
 
         if reason:
-            to_close.append((mid, pos, market, ev_current, end_dt, " | ".join(reason)))
+            to_close.append((mid, pos, market, ev, end_dt, " | ".join(reason)))
 
     if not to_close:
         logger.info("Aucune position à fermer selon les critères de cleanup.")

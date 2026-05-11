@@ -297,6 +297,8 @@ def run_once(dry_run: bool = False):
                         f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={bet:.2f}$")
             add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
                          bet_amount=bet)
+            if mid in portfolio["positions_ouvertes"] and end_dt.year != 9999:
+                portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
             nb_new += 1
         else:
             if not check_liquidity(client, no_token, bet):
@@ -307,6 +309,8 @@ def run_once(dry_run: bool = False):
                 m["_order_id"] = resp.get("orderID", "")
                 add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
                              bet_amount=bet)
+                if mid in portfolio["positions_ouvertes"] and end_dt.year != 9999:
+                    portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
                 nb_new += 1
                 logger.info(f"  [ENTREE] {strategy:3s} | {end_str} | "
                             f"{str(m.get('question',''))[:45]:45s} | "

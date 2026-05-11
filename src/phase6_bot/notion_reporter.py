@@ -100,20 +100,14 @@ def _expected_gain_usd(pos: dict) -> float:
 
 def _build_page_properties(pos: dict, market_id: str) -> dict:
     """Construit le dict de propriétés Notion pour une position."""
-    question    = pos.get("question", "")[:100]
-    bet_amount  = pos.get("bet_amount", 0.0)
-    gain_espere = _expected_gain_usd(pos)
-    strategy    = pos.get("strategy", "")
-    yes_price   = pos.get("entry_price_yes", 0.0)
-
-    # Date de résolution
-    entry_date = pos.get("entry_date", "")
-    # La date de résolution n'est pas stockée dans le portfolio → on la laisse vide
-    # sauf si on l'ajoute lors de add_position (amélioration future).
-    # On utilise un champ texte pour le market_id.
+    question         = pos.get("question", "")[:100]
+    bet_amount       = pos.get("bet_amount", 0.0)
+    gain_espere      = _expected_gain_usd(pos)
+    strategy         = pos.get("strategy", "")
+    yes_price        = pos.get("entry_price_yes", 0.0)
+    resolution_date  = pos.get("resolution_date", "")   # format "YYYY-MM-DD"
 
     props = {
-        # Titre de la page = question du marché
         "Titre": {
             "title": [{"type": "text", "text": {"content": question}}]
         },
@@ -122,6 +116,10 @@ def _build_page_properties(pos: dict, market_id: str) -> dict:
         },
         "Gain espéré ($)": {
             "number": gain_espere
+        },
+        "Résolution": {
+            # Notion attend un objet date avec "start" en ISO 8601
+            "date": {"start": resolution_date} if resolution_date else None
         },
         "Stratégie": {
             "select": {"name": strategy}
@@ -133,6 +131,9 @@ def _build_page_properties(pos: dict, market_id: str) -> dict:
             "rich_text": [{"type": "text", "text": {"content": market_id}}]
         },
     }
+    # Notion rejette les propriétés date avec value None → les retirer si absentes
+    if not resolution_date:
+        del props["Résolution"]
     return props
 
 

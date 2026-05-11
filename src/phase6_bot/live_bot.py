@@ -352,7 +352,7 @@ def run_cleanup(dry_run: bool = False):
             continue
         end_dt = parse_end_date(market)
 
-        if ev < MIN_EXPECTED_GAIN_PCT and end_dt > cutoff:
+        if ev < MIN_EXPECTED_GAIN_PCT or end_dt > cutoff:
             to_close.append((mid, pos, market, ev, end_dt))
 
     if not to_close:

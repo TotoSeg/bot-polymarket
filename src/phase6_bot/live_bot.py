@@ -346,24 +346,37 @@ def run_cleanup(dry_run: bool = False):
     logger.info("Critères : EV<5% (prix d'entrée) OU résolution>31/05")
     logger.info("=" * 60)
 
-    to_close   = []
-    manual_close = []   # positions sans liquidité à fermer manuellement
+    to_close = []
 
     for mid, pos in list(portfolio["positions_ouvertes"].items()):
-        market = get_market(mid)
-        if market is None:
-            logger.warning(f"  Marché introuvable : {mid[:12]}...")
-            continue
+        question = pos.get("question", "")[:60]
+        ev       = calc_expected_gain_pct(pos["win_rate_prior"], pos["entry_price_yes"])
 
-        # EV calculé sur le prix d'entrée (stratégie d'origine)
-        ev     = calc_expected_gain_pct(pos["win_rate_prior"], pos["entry_price_yes"])
-        end_dt = parse_end_date(market)
+        # Récupérer la date de résolution : API en priorité, sinon portfolio JSON
+        market = get_market(mid)
+        if market is not None:
+            end_dt = parse_end_date(market)
+        else:
+            # API injoignable — utiliser la date stockée dans le portfolio si disponible
+            stored = pos.get("resolution_date", "")
+            if stored:
+                try:
+                    end_dt = datetime.fromisoformat(stored + "T00:00:00").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    end_dt = datetime(9999, 12, 31, tzinfo=timezone.utc)
+            else:
+                end_dt = datetime(9999, 12, 31, tzinfo=timezone.utc)
+            logger.warning(f"  API injoignable pour {question[:40]} → date utilisée : "
+                           f"{end_dt.strftime('%Y-%m-%d') if end_dt.year != 9999 else 'inconnue'}")
+
+        end_str = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "inconnue"
+        logger.info(f"  Scan {question[:45]} | EV={ev*100:.1f}% | résolution={end_str}")
 
         reason = []
         if ev < MIN_EXPECTED_GAIN_PCT:
             reason.append(f"EV={ev*100:.1f}%<5%")
         if end_dt > cutoff:
-            reason.append(f"résolution={end_dt.strftime('%Y-%m-%d')}>31/05")
+            reason.append(f"résolution={end_str}>31/05")
 
         if reason:
             to_close.append((mid, pos, market, ev, end_dt, " | ".join(reason)))

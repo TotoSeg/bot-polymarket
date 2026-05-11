@@ -38,7 +38,7 @@ if _env_file.exists():
 from loguru import logger
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.phase5_paper.polymarket_client import get_active_markets, parse_yes_price, parse_resolution, get_market
+from src.phase5_paper.polymarket_client import get_active_markets, parse_yes_price, parse_resolution, get_market, get_market_by_token_id
 from src.phase5_paper.strategy_signals   import check_signals
 from src.phase5_paper.paper_portfolio    import (
     load_portfolio, save_portfolio, add_position, close_position, print_summary,
@@ -47,7 +47,7 @@ from src.phase5_paper.paper_portfolio    import (
 from src.phase6_bot.order_executor import (
     build_client, create_api_keys, get_no_token_id, check_liquidity,
     place_no_order, get_usdc_balance,
-    check_sell_liquidity, sell_no_position,
+    check_sell_liquidity, sell_no_position, get_all_clob_positions,
 )
 from src.phase6_bot.notion_reporter import update_notion_report
 
@@ -348,16 +348,15 @@ def run_cleanup(dry_run: bool = False):
 
     to_close = []
 
-    for mid, pos in list(portfolio["positions_ouvertes"].items()):
-        question = pos.get("question", "")[:60]
-        ev       = calc_expected_gain_pct(pos["win_rate_prior"], pos["entry_price_yes"])
+    def _scan_position(mid, pos, market, source="portfolio"):
+        """Évalue si une position doit être fermée et l'ajoute à to_close si oui."""
+        question = pos.get("question", "?")[:60]
+        ev       = calc_expected_gain_pct(pos.get("win_rate_prior", 0.97),
+                                          pos.get("entry_price_yes", 0.07))
 
-        # Récupérer la date de résolution : API en priorité, sinon portfolio JSON
-        market = get_market(mid)
         if market is not None:
             end_dt = parse_end_date(market)
         else:
-            # API injoignable — utiliser la date stockée dans le portfolio si disponible
             stored = pos.get("resolution_date", "")
             if stored:
                 try:
@@ -366,11 +365,9 @@ def run_cleanup(dry_run: bool = False):
                     end_dt = datetime(9999, 12, 31, tzinfo=timezone.utc)
             else:
                 end_dt = datetime(9999, 12, 31, tzinfo=timezone.utc)
-            logger.warning(f"  API injoignable pour {question[:40]} → date utilisée : "
-                           f"{end_dt.strftime('%Y-%m-%d') if end_dt.year != 9999 else 'inconnue'}")
 
         end_str = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "inconnue"
-        logger.info(f"  Scan {question[:45]} | EV={ev*100:.1f}% | résolution={end_str}")
+        logger.info(f"  [{source}] {question[:45]} | EV={ev*100:.1f}% | résolution={end_str}")
 
         reason = []
         if ev < MIN_EXPECTED_GAIN_PCT:
@@ -379,7 +376,53 @@ def run_cleanup(dry_run: bool = False):
             reason.append(f"résolution={end_str}>31/05")
 
         if reason:
-            to_close.append((mid, pos, market, ev, end_dt, " | ".join(reason)))
+            to_close.append((mid, pos, market, end_dt, " | ".join(reason)))
+
+    # ── Scan 1 : positions du portfolio JSON ─────────────────────────────────
+    logger.info("Scan des positions du portfolio JSON...")
+    for mid, pos in list(portfolio["positions_ouvertes"].items()):
+        market = get_market(mid)
+        _scan_position(mid, pos, market, source="JSON")
+        time.sleep(0.1)
+
+    # ── Scan 2 : positions CLOB non trackées dans le portfolio JSON ──────────
+    logger.info("Scan des positions CLOB (wallet Polymarket)...")
+    clob_positions = get_all_clob_positions()
+    known_tokens   = {
+        p.get("token_id", "") for p in portfolio["positions_ouvertes"].values()
+    }
+
+    for clob_pos in clob_positions:
+        token_id = str(clob_pos.get("asset_id") or clob_pos.get("token_id") or "")
+        balance  = float(clob_pos.get("balance", 0) or 0)
+        outcome  = str(clob_pos.get("outcome", "")).upper()
+
+        if not token_id or balance < 0.001:
+            continue
+        if token_id in known_tokens:
+            continue   # déjà scanné via le portfolio JSON
+        if outcome == "YES":
+            continue   # on ne détient que des NO dans nos stratégies
+
+        # Retrouver le marché associé à ce token
+        market = get_market_by_token_id(token_id)
+        if market is None:
+            logger.warning(f"  [CLOB] token {token_id[:12]}... — marché introuvable, fermeture manuelle requise")
+            continue
+
+        # Reconstruire un pseudo-pos pour l'évaluation
+        yes_p = parse_yes_price(market) or 0.07
+        pos = {
+            "question":        str(market.get("question", ""))[:80],
+            "strategy":        "??",
+            "win_rate_prior":  0.97,
+            "entry_price_yes": yes_p,
+            "bet_amount":      balance * (1.0 - yes_p),   # estimation USDC investi
+            "token_id":        token_id,
+            "tokens_held":     balance,
+        }
+        _scan_position(token_id, pos, market, source="CLOB hors JSON")
+        time.sleep(0.1)
 
     if not to_close:
         logger.info("Aucune position à fermer selon les critères de cleanup.")
@@ -390,7 +433,7 @@ def run_cleanup(dry_run: bool = False):
     nb_sold = 0
     nb_failed = 0
 
-    for mid, pos, market, ev, end_dt, reason_str in to_close:
+    for mid, pos, market, end_dt, reason_str in to_close:
         question = pos.get("question", "")[:60]
         end_str  = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "???"
         logger.info(f"  {question}")
@@ -400,27 +443,35 @@ def run_cleanup(dry_run: bool = False):
             logger.info(f"    [DRY-RUN] Serait vendu")
             continue
 
-        no_token = get_no_token_id(market)
+        # Résoudre le token NO : depuis le market si dispo, ou depuis pos (CLOB hors JSON)
+        if market is not None:
+            no_token = get_no_token_id(market)
+        else:
+            no_token = pos.get("token_id")
+
         if not no_token:
-            logger.warning(f"    Pas de token NO pour {mid[:12]}... → fermeture manuelle requise sur polymarket.com")
+            logger.warning(f"    Pas de token NO pour {mid[:12]}... → fermeture manuelle sur polymarket.com")
             nb_failed += 1
             continue
 
-        entry_no_price = 1.0 - pos["entry_price_yes"]
-        tokens_held    = pos["bet_amount"] / max(entry_no_price, 0.001)
+        # Nombre de tokens : depuis pos["tokens_held"] (CLOB hors JSON) ou calcul
+        tokens_held = pos.get("tokens_held") or (
+            pos["bet_amount"] / max(1.0 - pos["entry_price_yes"], 0.001)
+        )
 
-        # Vendre au meilleur prix disponible (min_price=0 = accepter toute offre)
         resp = sell_no_position(client, no_token, tokens_held, min_price=0.0)
         if resp:
-            sale_price = float(resp.get("price", entry_no_price))
+            sale_price = float(resp.get("price", 1.0 - pos["entry_price_yes"]))
             proceeds   = tokens_held * sale_price * (1.0 - POLYMARKET_FEE)
             profit     = round(proceeds - pos["bet_amount"], 2)
-            close_position(portfolio, mid, outcome=0, override_profit=profit)
+            # Retirer du portfolio JSON si la position y était trackée
+            if mid in portfolio["positions_ouvertes"]:
+                close_position(portfolio, mid, outcome=0, override_profit=profit)
             nb_sold += 1
             logger.success(f"    Vendu – produit={proceeds:.2f}$ | P&L={profit:+.2f}$")
         else:
             nb_failed += 1
-            logger.warning(f"    Impossible de vendre {mid[:12]}... – position conservée")
+            logger.warning(f"    Impossible de vendre → fermeture manuelle sur polymarket.com")
 
         time.sleep(0.5)
 

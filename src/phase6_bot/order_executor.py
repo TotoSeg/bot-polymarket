@@ -12,6 +12,7 @@ Changements V1 → V2 :
 """
 
 import os, json
+import requests
 from typing import Optional
 from loguru import logger
 
@@ -236,6 +237,42 @@ def sell_no_position(client: ClobClient, token_id: str,
     except Exception as e:
         logger.error(f"  Vente échouée (token={token_id[:15]}...) : {e}")
         return None
+
+
+# ── Positions ouvertes sur Polymarket ────────────────────────────────────────
+
+def get_all_clob_positions() -> list[dict]:
+    """
+    Récupère toutes les positions ouvertes du wallet depuis l'API CLOB.
+    Utilise l'adresse proxy (POLYMARKET_PROXY_WALLET) du .env.
+
+    Retourne une liste de dicts avec au minimum :
+        asset_id  : token_id du token détenu (YES ou NO)
+        balance   : nombre de tokens (float)
+        outcome   : "YES" ou "NO"
+        market    : market_id associé (si disponible)
+    """
+    funder = os.environ.get("POLYMARKET_PROXY_WALLET", "").strip()
+    if not funder:
+        logger.warning("POLYMARKET_PROXY_WALLET absent du .env — impossible de lister les positions CLOB")
+        return []
+    try:
+        resp = requests.get(
+            "https://clob.polymarket.com/data/position",
+            params={"user": funder, "sizeThreshold": "0.001"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        # Certaines versions retournent {"positions": [...]}
+        if isinstance(data, dict):
+            return data.get("positions", [])
+        return []
+    except Exception as e:
+        logger.warning(f"Erreur récupération positions CLOB : {e}")
+        return []
 
 
 # ── Lecture du solde ─────────────────────────────────────────────────────────

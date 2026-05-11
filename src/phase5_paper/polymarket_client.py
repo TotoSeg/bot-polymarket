@@ -1,18 +1,20 @@
 """
-Phase 5 — Client API Polymarket
-================================
+Phase 5 – Client API Polymarket
+===============================
 Accès aux données en temps réel via l'API Gamma (métadonnées + prix).
 
 Endpoints utilisés :
   GET https://gamma-api.polymarket.com/markets
-    → Liste des marchés actifs avec prix YES/NO courants
+    ➔ Liste des marchés actifs avec prix YES/NO courants
   GET https://gamma-api.polymarket.com/markets/{id}
-    → Détail d'un marché (résolution, prix finaux)
+    ➔ Détail d'un marché (résolution, prix finaux)
+  GET https://gamma-api.polymarket.com/markets?clobTokenIds={token_id}
+    ➔ Marché associé à un token_id (lookup inverse)
 
-Format des prix (outcomePrices) :
-  Marché ouvert  : ["0.97", "0.03"]   → YES 97%, NO 3%
-  Résolu YES     : ["1", "0"]         → YES a gagné
-  Résolu NO      : ["0", "1"]         → NO a gagné
+Format des prix (outcomeePrices) :
+  Marché ouvert  : ["0.97", "0.03"]  ➔ YES 97%, NO 3%
+  Résolu YES     : ["1", "0"]         ➔ YES a gagné
+  Résolu NO      : ["0", "1"]         ➔ NO a gagné
 
 Usage :
     from src.phase5_paper.polymarket_client import get_active_markets, get_market
@@ -29,20 +31,17 @@ from loguru import logger
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-GAMMA_API   = "https://gamma-api.polymarket.com"
-PAGE_SIZE   = 100     # Marchés par requête
-REQUEST_DELAY = 0.15  # Secondes entre requêtes (éviter ban)
+GAMMA_API     = "https://gamma-api.polymarket.com"
+PAGE_SIZE     = 100
+REQUEST_DELAY = 0.15
 
 
 def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[dict]:
     """
-    Récupère tous les marchés OUVERTS (non résolus) depuis l'API Gamma.
+    Récupère tous les marchés OUVERTS depuis l'API Gamma.
 
-    min_volume : volume minimum en USD pour filtrer les marchés trop petits
-    max_pages  : limite de pages à charger (sécurité anti-boucle infinie)
-
-    Retourne une liste de dicts avec au minimum :
-        id, question, outcomePrices, volume, endDate, createdAt, closed
+    min_volume : volume minimum en USD
+    max_pages  : limite de pages (sécurité anti-boucle infinie)
     """
     all_markets = []
     offset = 0
@@ -63,7 +62,6 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
         if not data:
             break
 
-        # Filtrer sur le volume minimum
         for m in data:
             vol = float(m.get("volume", 0) or 0)
             if vol >= min_volume:
@@ -72,7 +70,7 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
         logger.debug(f"  Page {page+1} : {len(data)} marchés récupérés (total : {len(all_markets)})")
 
         if len(data) < PAGE_SIZE:
-            break  # Dernière page
+            break
 
         offset += PAGE_SIZE
         time.sleep(REQUEST_DELAY)
@@ -82,11 +80,7 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
 
 
 def get_market(market_id: str) -> Optional[dict]:
-    """
-    Récupère le détail d'un marché spécifique (pour vérifier sa résolution).
-
-    Retourne None si le marché n'existe pas ou en cas d'erreur réseau.
-    """
+    """Récupère le détail d'un marché par son ID."""
     try:
         resp = requests.get(f"{GAMMA_API}/markets/{market_id}", timeout=15)
         resp.raise_for_status()
@@ -96,14 +90,30 @@ def get_market(market_id: str) -> Optional[dict]:
         return None
 
 
-def parse_yes_price(market: dict) -> Optional[float]:
+def get_market_by_token_id(token_id: str) -> Optional[dict]:
     """
-    Extrait le prix YES courant d'un marché.
+    Récupère le marché associé à un token_id (YES ou NO).
+    Utile pour retrouver un marché à partir d'une position CLOB.
+    """
+    try:
+        resp = requests.get(
+            f"{GAMMA_API}/markets",
+            params={"clobTokenIds": token_id},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list) and data:
+            return data[0]
+        return None
+    except requests.RequestException as e:
+        logger.warning(f"Erreur get_market_by_token_id({token_id[:12]}...) : {e}")
+        return None
 
-    outcomePrices peut être une string JSON ou une liste Python.
-    Retourne None si le parsing échoue.
-    """
-    raw = market.get("outcomePrices")
+
+def parse_yes_price(market: dict) -> Optional[float]:
+    """Extrait le prix YES courant d'un marché."""
+    raw = market.get("outcomeePrices")
     if raw is None:
         return None
     try:
@@ -116,16 +126,12 @@ def parse_yes_price(market: dict) -> Optional[float]:
 def parse_resolution(market: dict) -> Optional[int]:
     """
     Extrait le résultat d'un marché résolu.
-
-    Retourne :
-        0  si NO a gagné (outcomePrices[0] == "0")
-        1  si YES a gagné (outcomePrices[0] == "1")
-        None si le marché n'est pas encore résolu
+    Retourne 0 (NO gagne), 1 (YES gagne), ou None (non résolu).
     """
     if not market.get("closed", False):
         return None
 
-    raw = market.get("outcomePrices")
+    raw = market.get("outcomeePrices")
     if raw is None:
         return None
 
@@ -133,9 +139,9 @@ def parse_resolution(market: dict) -> Optional[int]:
         prices = json.loads(raw) if isinstance(raw, str) else raw
         first = float(prices[0])
         if first == 1.0:
-            return 1  # YES a gagné
+            return 1
         elif first == 0.0:
-            return 0  # NO a gagné
-        return None  # Pas encore tranché
+            return 0
+        return None
     except (ValueError, IndexError, TypeError):
         return None

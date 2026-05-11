@@ -1,6 +1,6 @@
 """
-Phase 5 — Gestion du portefeuille paper trading
-=================================================
+Phase 5 – Gestion du portefeuille paper trading
+===============================================
 Persiste l'état du portefeuille dans un fichier JSON entre les runs.
 
 Structure du fichier portfolio.json :
@@ -9,23 +9,23 @@ Structure du fichier portfolio.json :
   "capital_disponible": 987.50,
   "positions_ouvertes": {
     "<market_id>": {
-      "market_id":      "0xabc...",
-      "question":       "Will X happen?",
-      "strategy":       "S2",
+      "market_id":       "0xabc...",
+      "question":        "Will X happen?",
+      "strategy":        "S2",
       "win_rate_prior": 0.999,
       "entry_price_yes": 0.03,
-      "bet_amount":     10.0,
-      "entry_date":     "2026-04-28T10:00:00",
-      "reason":         "YES=0.03 < 5%"
+      "bet_amount":      10.0,
+      "entry_date":      "2026-04-28T10:00:00",
+      "reason":          "YES=0.03 < 5%"
     }
   },
   "trades_clos": [
     {
       ...même champs...,
-      "exit_date":  "2026-05-01T12:00:00",
-      "outcome":    0,           (0=NO gagne, 1=YES gagne)
+      "exit_date":   "2026-05-01T12:00:00",
+      "outcome":     0,              (0=NO gagné, 1=YES gagné)
       "profit_net": 7.35,
-      "win":        true
+      "win":         true
     }
   ]
 }
@@ -35,6 +35,7 @@ import sys
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from loguru import logger
 
@@ -46,47 +47,47 @@ POLYMARKET_FEE = 0.02
 
 # Fraction Kelly et borne max
 KELLY_FRACTION = 0.25
-MAX_BET_PCT    = 0.05   # 5% du capital initial max par trade (↓ de 10%)
-                         # → permet ~20 positions simultanées au lieu de 10
+MAX_BET_PCT    = 0.05   # 5% du capital initial max par trade (⇄ de 10%)
+                         # ⇄ permet ~20 positions simultanées au lieu de 10
 
-# Pas de limite de positions par stratégie — le capital disponible est le seul frein
+# Pas de limite de positions par stratégie ⤍ le capital disponible est le seul frein
 MAX_POSITIONS_PER_STRATEGY = {}
 
 
 def _kelly_size(win_rate: float, p_yes: float, initial_capital: float) -> float:
-    """Calcule la mise en dollars selon le Kelly criterion fractionné."""
+    """Calcule la mise en dollars selon le Kelly critérium fractionné."""
     p_no   = 1.0 - p_yes
     if p_no <= 0:
         return 0.0
-    odds_b = p_yes / p_no   # gain/perte ratio pour un pari NO
+    odds_b = p_yes / p_no     # gain/perte ratio pour un pari NO
     if odds_b <= 0 or win_rate <= 0:
         return 0.0
 
-    q      = 1.0 - win_rate
-    f_star = (odds_b * win_rate - q) / odds_b
+    q       = 1.0 - win_rate
+    f_star  = (odds_b * win_rate - q) / odds_b
     f_kelly = f_star * KELLY_FRACTION
     f_kelly = max(0.001, min(f_kelly, MAX_BET_PCT))  # clipper
 
-    # Plafonner à initial_capital * MAX_BET_PCT pour éviter l'exponentiel
+    # Plafonner à initial_capital * MAX_BET_PCT pour éviter l'exponentielle
     return round(initial_capital * f_kelly, 2)
 
 
 def load_portfolio(path: Path) -> dict:
-    """Charge le portefeuille depuis le fichier JSON (crée un neuf si absent)."""
+    """Charge le portefeuille depuis le fichier JSON (créé un neuf si absent)."""
     if path.exists():
         with open(path, encoding="utf-8") as f:
             p = json.load(f)
-        # Migration : ajouter total_depose si absent (anciens portfolios)
+        # Migration : ajouter total_depose si absent (anciens portefeuilles)
         if "total_depose" not in p:
             p["total_depose"] = p["capital_initial"]
         return p
     # Nouveau portefeuille vierge
     return {
-        "capital_initial":    1000.0,
+        "capital_initial":   1000.0,
         "capital_disponible": 1000.0,
-        "total_depose":       1000.0,  # cumul de tous les dépôts externes
+        "total_depose":        1000.0,   # cumul de tous les dépôts externes
         "positions_ouvertes": {},
-        "trades_clos":        [],
+        "trades_clos":         [],
     }
 
 
@@ -97,8 +98,8 @@ def save_portfolio(portfolio: dict, path: Path):
 
 
 def add_position(portfolio: dict, market: dict, strategy: str,
-                 win_rate_prior: float, entry_price_yes: float, reason: str,
-                 bet_amount: float = None):
+                  win_rate_prior: float, entry_price_yes: float, reason: str,
+                  bet_amount: float = None):
     """
     Enregistre une nouvelle position ouverte.
 
@@ -142,18 +143,18 @@ def add_position(portfolio: dict, market: dict, strategy: str,
         "entry_date":       datetime.now(tz=timezone.utc).isoformat(),
         "reason":           reason,
     }
-    logger.success(
-        f"  [ENTREE] {strategy:3s} | {str(market.get('question',''))[:50]:50s} | "
-        f"YES={entry_price_yes:.3f} | Mise={bet_amount:.2f}$"
-    )
     return True
 
 
-def close_position(portfolio: dict, market_id: str, outcome: int, exit_date: str = None):
+def close_position(portfolio: dict, market_id: str, outcome: int,
+                   exit_date: str = None, override_profit: Optional[float] = None):
     """
     Ferme une position et calcule le P&L.
 
-    outcome : 0 = NO gagne (on gagne), 1 = YES gagne (on perd)
+    outcome         : 0 = NO gagné (on gagne), 1 = YES gagné (on perd)
+    override_profit : si fourni, utilise ce P&L net réalisé à la place
+                      du calcul théorique basé sur le prix d'entrée.
+                      Utile pour les clôtures anticipées via vente CLOB.
     """
     pos = portfolio["positions_ouvertes"].pop(market_id, None)
     if pos is None:
@@ -164,11 +165,15 @@ def close_position(portfolio: dict, market_id: str, outcome: int, exit_date: str
     bet    = pos["bet_amount"]
     odds_b = p_yes / p_no if p_no > 0 else 0
 
-    if outcome == 0:  # NO gagne → on gagne
+    if override_profit is not None:
+        # P&L réel fourni (clôture anticipée via vente CLOB ou cleanup)
+        profit_net = round(override_profit, 2)
+        win        = profit_net >= 0
+    elif outcome == 0:    # NO gagné ⇄ on gagne
         profit_gross = bet * odds_b
         profit_net   = round(profit_gross * (1 - POLYMARKET_FEE), 2)
         win = True
-    else:              # YES gagne → on perd
+    else:               # YES gagné ⇄ on perd
         profit_net = -bet
         win = False
 
@@ -177,10 +182,10 @@ def close_position(portfolio: dict, market_id: str, outcome: int, exit_date: str
 
     trade = {
         **pos,
-        "exit_date":  exit_date or datetime.now(tz=timezone.utc).isoformat(),
-        "outcome":    outcome,
+        "exit_date":   exit_date or datetime.now(tz=timezone.utc).isoformat(),
+        "outcome":     outcome,
         "profit_net": profit_net,
-        "win":        win,
+        "win":         win,
     }
     portfolio["trades_clos"].append(trade)
 
@@ -215,14 +220,14 @@ def print_summary(portfolio: dict):
     logger.info("\n" + "=" * 60)
     logger.info("PORTEFEUILLE LIVE")
     logger.info("=" * 60)
-    logger.info(f"  Total verse         : {total_depose:>10.2f}$")
-    logger.info(f"  Capital total       : {capital_total:>10.2f}$")
-    logger.info(f"  Capital disponible  : {capital_dispo:>10.2f}$")
-    logger.info(f"  Capital engage      : {capital_engage:>10.2f}$ ({len(ouvert)} positions)")
-    logger.info(f"  P&L realise         : {pnl_clos:>+10.2f}$")
-    logger.info(f"  ROI (sur versements): {roi_pct:>+9.2f}%")
-    logger.info(f"  Trades clos         : {nb_total:>10,}")
-    logger.info(f"  Win rate            : {wr:>9.1f}%")
+    logger.info(f"  Total versé          : {total_depose:>10.2f}$")
+    logger.info(f"  Capital total        : {capital_total:>10.2f}$")
+    logger.info(f"  Capital disponible   : {capital_dispo:>10.2f}$")
+    logger.info(f"  Capital engagé       : {capital_engage:>10.2f}$ ({len(ouvert)} positions)")
+    logger.info(f"  P&L réalisé          : {pnl_clos:>+10.2f}$")
+    logger.info(f"  ROI (sur versements) : {roi_pct:>+9.2f}%")
+    logger.info(f"  Trades clos          : {nb_total:>10,}")
+    logger.info(f"  Win rate             : {wr:>9.1f}%")
 
     if ouvert:
         logger.info(f"\n  Positions ouvertes ({len(ouvert)}) :")
@@ -236,14 +241,14 @@ def print_summary(portfolio: dict):
 
     # Répartition par stratégie
     if clos:
-        logger.info("\n  Performance par strategie :")
+        logger.info("\n  Performance par stratégie :")
         from collections import defaultdict
         stats = defaultdict(lambda: {"wins": 0, "total": 0, "pnl": 0.0})
         for t in clos:
             s = t["strategy"]
             stats[s]["total"] += 1
-            stats[s]["wins"]  += int(t["win"])
-            stats[s]["pnl"]   += t["profit_net"]
+            stats[s]["wins"] += int(t["win"])
+            stats[s]["pnl"]  += t["profit_net"]
         for s, st in sorted(stats.items()):
             wr_s = st["wins"] / st["total"] * 100 if st["total"] > 0 else 0
             logger.info(

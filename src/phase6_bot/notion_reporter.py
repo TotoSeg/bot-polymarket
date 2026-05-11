@@ -150,9 +150,17 @@ def _build_page_properties(pos: dict, market_id: str) -> dict:
     yes_price       = pos.get("entry_price_yes", 0.0)
     resolution_date = pos.get("resolution_date", "")
 
+    # Taille totale = nombre de tokens NO × 1$ = ce que Polymarket affiche
+    # = Mise / (1 - YES_entrée) = montant récupéré si NO gagne
+    no_price = 1.0 - yes_price
+    taille   = round(bet_amount / no_price, 2) if no_price > 0 else 0.0
+
     props = {
         "Titre": {
             "title": [{"type": "text", "text": {"content": question}}]
+        },
+        "Taille ($)": {
+            "number": taille
         },
         "Mise ($)": {
             "number": round(bet_amount, 2)
@@ -174,7 +182,6 @@ def _build_page_properties(pos: dict, market_id: str) -> dict:
     if resolution_date:
         props["Résolution"] = {"date": {"start": resolution_date}}
 
-    # Retirer les propriétés avec valeur None (Notion rejette null dans select)
     return {k: v for k, v in props.items() if v is not None}
 
 

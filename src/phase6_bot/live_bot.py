@@ -340,10 +340,11 @@ def run_cleanup(dry_run: bool = False):
     portfolio = load_portfolio(PORTFOLIO_FILE)
     client    = None if dry_run else build_client()
     cutoff    = datetime(2026, 5, 31, 23, 59, 59, tzinfo=timezone.utc)
+    now_utc   = datetime.now(tz=timezone.utc)
 
     logger.info("=" * 60)
     logger.info("CLEANUP – Fermeture des positions hors règles")
-    logger.info("Critères : EV<5% (prix d'entrée) OU résolution>31/05")
+    logger.info("Critères : EV<5% OU résolution>31/05 OU marché en retard (endDate dépassée)")
     logger.info("=" * 60)
 
     to_close = []
@@ -374,6 +375,9 @@ def run_cleanup(dry_run: bool = False):
             reason.append(f"EV={ev*100:.1f}%<5%")
         if end_dt > cutoff:
             reason.append(f"résolution={end_str}>31/05")
+        # Marché dont l'endDate est dépassée depuis plus d'un jour mais toujours ouvert
+        if end_dt < now_utc - timedelta(days=1):
+            reason.append(f"marché en retard (endDate={end_str} dépassée)")
 
         if reason:
             to_close.append((mid, pos, market, end_dt, " | ".join(reason)))

@@ -277,9 +277,15 @@ def run_once(dry_run: bool = False):
                for p in portfolio["positions_ouvertes"].values()):
             continue
 
-        # Mise Kelly plafonnée
-        bet = min(_kelly_size(sig["win_rate_prior"], yp, capital_kelly), max_bet)
-        if bet <= 0 or bet > portfolio["capital_disponible"]:
+        # Mise = min(Kelly, max_bet, capital_disponible)
+        # On utilise tout le capital dispo si Kelly > dispo (pas de skip pour capital insuffisant).
+        # Skip uniquement si le résultat < 1$ (minimum CLOB).
+        bet = min(
+            _kelly_size(sig["win_rate_prior"], yp, capital_kelly),
+            max_bet,
+            portfolio["capital_disponible"],
+        )
+        if bet < 1.0:
             skipped += 1
             continue
 

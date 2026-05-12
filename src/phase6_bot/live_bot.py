@@ -65,8 +65,8 @@ MIN_EXPECTED_GAIN_PCT = 0.05   # 5%
 # Fenêtre maximale de résolution (règle 3)
 MAX_DAYS_TO_RESOLUTION = 14
 
-# Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 0.1% = NO gagne à 99.9%
-EARLY_CLOSE_YES_THRESHOLD = 0.001
+# Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 1% = NO gagne à 99%
+EARLY_CLOSE_YES_THRESHOLD = 0.01
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────

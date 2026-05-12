@@ -258,7 +258,7 @@ def get_all_clob_positions() -> list[dict]:
         return []
     try:
         resp = requests.get(
-            "https://clob.polymarket.com/data/position",
+            "https://data-api.polymarket.com/positions",
             params={"user": funder, "sizeThreshold": "0.001"},
             timeout=15,
         )
@@ -266,7 +266,6 @@ def get_all_clob_positions() -> list[dict]:
         data = resp.json()
         if isinstance(data, list):
             return data
-        # Certaines versions retournent {"positions": [...]}
         if isinstance(data, dict):
             return data.get("positions", [])
         return []

@@ -250,10 +250,15 @@ def run_once(dry_run: bool = False):
     now_utc        = datetime.now(tz=timezone.utc)
     window_cutoff  = now_utc + timedelta(days=MAX_DAYS_TO_RESOLUTION)
 
-    capital_commit = sum(p["bet_amount"] for p in portfolio["positions_ouvertes"].values())
-    capital_kelly  = portfolio["capital_disponible"] + capital_commit
+    # Capital Kelly = liquidités + valeur face des positions (tokens × 1$)
+    # = ce que Polymarket affiche comme valeur totale du portefeuille
+    valeur_face   = sum(
+        p["bet_amount"] / max(1.0 - p.get("entry_price_yes", 0.5), 0.001)
+        for p in portfolio["positions_ouvertes"].values()
+    )
+    capital_kelly = portfolio["capital_disponible"] + valeur_face
     logger.info(f"Capital Kelly : {capital_kelly:.2f}$ "
-                f"(dispo {portfolio['capital_disponible']:.2f}$ + engagé {capital_commit:.2f}$)")
+                f"(dispo {portfolio['capital_disponible']:.2f}$ + face {valeur_face:.2f}$)")
 
     # Collecter les signaux S3 + SP, filtrer et trier
     candidates = []

@@ -260,13 +260,10 @@ def run_once(dry_run: bool = False):
     now_utc        = datetime.now(tz=timezone.utc)
     window_cutoff  = now_utc + timedelta(days=MAX_DAYS_TO_RESOLUTION)
 
-    # Capital de référence Kelly = max(capital déposé, capital disponible)
-    # Ancré sur total_depose (l'argent réellement mis sur Polymarket), croît avec les profits.
-    # Évite l'inflation du Kelly liée aux mises engagées en cours.
-    capital_kelly = max(portfolio["total_depose"], portfolio["capital_disponible"])
+    capital_commit = sum(p["bet_amount"] for p in portfolio["positions_ouvertes"].values())
+    capital_kelly  = portfolio["capital_disponible"] + capital_commit
     logger.info(f"Capital Kelly : {capital_kelly:.2f}$ "
-                f"(total_depose={portfolio['total_depose']:.2f}$ | "
-                f"dispo={portfolio['capital_disponible']:.2f}$)")
+                f"(dispo {portfolio['capital_disponible']:.2f}$ + engagé {capital_commit:.2f}$)")
 
     # Collecter les signaux S3 + SP, filtrer et trier
     candidates = []

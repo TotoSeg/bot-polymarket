@@ -260,10 +260,13 @@ def run_once(dry_run: bool = False):
     now_utc        = datetime.now(tz=timezone.utc)
     window_cutoff  = now_utc + timedelta(days=MAX_DAYS_TO_RESOLUTION)
 
-    capital_commit = sum(p["bet_amount"] for p in portfolio["positions_ouvertes"].values())
-    capital_kelly  = portfolio["capital_disponible"] + capital_commit
+    # Capital de référence Kelly = max(capital déposé, capital disponible)
+    # Ancré sur total_depose (l'argent réellement mis sur Polymarket), croît avec les profits.
+    # Évite l'inflation du Kelly liée aux mises engagées en cours.
+    capital_kelly = max(portfolio["total_depose"], portfolio["capital_disponible"])
     logger.info(f"Capital Kelly : {capital_kelly:.2f}$ "
-                f"(dispo {portfolio['capital_disponible']:.2f}$ + engagé {capital_commit:.2f}$)")
+                f"(total_depose={portfolio['total_depose']:.2f}$ | "
+                f"dispo={portfolio['capital_disponible']:.2f}$)")
 
     # Collecter les signaux S3 + SP, filtrer et trier
     candidates = []
@@ -351,15 +354,16 @@ def run_once(dry_run: bool = False):
                 continue
             resp = place_no_order(client, no_token, bet, yp)
             if resp:
+                actual_bet = resp.get("_filled_usdc", bet)  # montant réellement exécuté (FAK partiel)
                 m["_order_id"] = resp.get("orderID", "")
                 add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
-                             bet_amount=bet)
+                             bet_amount=actual_bet)
                 if mid in portfolio["positions_ouvertes"] and end_dt.year != 9999:
                     portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
                 nb_new += 1
                 logger.info(f"  [ENTREE] {strategy:3s} | {end_str} | "
                             f"{str(m.get('question',''))[:45]:45s} | "
-                            f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={bet:.2f}$")
+                            f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={actual_bet:.2f}$")
             else:
                 skipped += 1
             time.sleep(0.3)

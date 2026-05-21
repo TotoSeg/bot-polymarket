@@ -105,8 +105,9 @@ def get_no_token_id(market: dict) -> Optional[str]:
 
 def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bool:
     """
-    Vérifie que le carnet d'ordres peut absorber la mise en totalité (seuil 95%).
-    Rejette aussi si le best ask dépasse 0.99 (prix NO trop élevé → ordre invalide CLOB).
+    Vérifie que le carnet d'ordres n'est pas vide et que le best ask ≤ 0.99.
+    Seuil abaissé à 50% car on utilise FAK (fill partiel accepté).
+    Rejette si le best ask dépasse 0.99 (prix NO trop élevé → ordre invalide CLOB).
     """
     try:
         book = client.get_order_book(token_id)
@@ -132,7 +133,7 @@ def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bo
         nb_levels = len(asks)
         logger.info(f"  Liquidité {token_id[:12]} : {total:.2f}$ sur {nb_levels} niveaux "
                     f"(best_ask={best_ask:.4f}) pour {amount_usdc:.2f}$ demandés")
-        if total < amount_usdc * 0.95:
+        if total < amount_usdc * 0.50:
             logger.warning(f"Liquidité insuffisante : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
             return False
         return True
@@ -186,31 +187,65 @@ def check_sell_liquidity(client: ClobClient, token_id: str,
         return False   # par prudence, ne pas vendre si on ne peut pas vérifier
 
 
+# ── Utilitaire : montant réellement exécuté ──────────────────────────────────
+
+def _extract_filled_usdc(resp: dict, requested_usdc: float) -> float:
+    """
+    Extrait le montant USDC réellement exécuté depuis la réponse CLOB.
+    Essaie plusieurs noms de champs possibles selon la version du SDK.
+    Retourne `requested_usdc` si le champ n'est pas trouvé (ordre entièrement exécuté supposé).
+    """
+    if not isinstance(resp, dict):
+        return requested_usdc
+    # Champs possibles selon py-clob-client-v2
+    for field in ("size_matched", "matched_amount", "filled_amount", "amount_filled"):
+        val = resp.get(field)
+        if val is not None:
+            try:
+                size = float(val)
+                price = float(resp.get("price", 1.0))
+                return round(size * price, 4)
+            except (TypeError, ValueError):
+                pass
+    # Si aucun champ de fill trouvé, suppose exécution complète
+    return requested_usdc
+
+
 # ── Placement d'ordre achat (CLOB V2) ────────────────────────────────────────
 
 def place_no_order(client: ClobClient, token_id: str,
                    amount_usdc: float, yes_price: float) -> Optional[dict]:
     """
-    Achète amount_usdc de tokens NO via CLOB V2.
-    tick_size="0.01" couvre la quasi-totalité des marchés Polymarket.
+    Achète amount_usdc de tokens NO via CLOB V2 (ordre FAK).
+    FAK = Fill And Kill : remplit ce qui est disponible, annule le reste.
+    Évite les échecs FOK dus à la race condition (order book légèrement décalé).
+    Retourne None si le fill est inférieur à $1 (ordre inutile).
     """
-    no_price     = min(round(1.0 - yes_price, 4), 0.99)  # CLOB max price = 0.99
-    amount_usdc  = max(round(amount_usdc, 2), 1.0)        # CLOB min order = $1
+    no_price    = min(round(1.0 - yes_price, 4), 0.99)  # CLOB max price = 0.99
+    amount_usdc = max(round(amount_usdc, 2), 1.0)        # CLOB min order = $1
 
     try:
         resp = client.create_and_post_market_order(
-            order_args  = MarketOrderArgs(
+            order_args = MarketOrderArgs(
                 token_id   = token_id,
                 amount     = amount_usdc,
                 side       = Side.BUY,
-                order_type = OrderType.FOK,
+                order_type = OrderType.FAK,
             ),
-            options     = PartialCreateOrderOptions(tick_size="0.01"),
-            order_type  = OrderType.FOK,
+            options    = PartialCreateOrderOptions(tick_size="0.01"),
+            order_type = OrderType.FAK,
         )
+
+        # Extraire le montant réellement exécuté depuis la réponse CLOB
+        filled_usdc = _extract_filled_usdc(resp, amount_usdc)
+        if filled_usdc < 1.0:
+            logger.warning(f"  Fill trop faible ({filled_usdc:.2f}$) pour {amount_usdc}$ demandés — ignoré")
+            return None
+
+        resp["_filled_usdc"] = filled_usdc
         logger.success(
             f"  Ordre NO placé : token={token_id[:15]}...  "
-            f"{amount_usdc}$ @ NO={no_price:.3f} | resp={resp}"
+            f"{filled_usdc:.2f}$ (demandé {amount_usdc:.2f}$) @ NO={no_price:.3f} | resp={resp}"
         )
         return resp
     except Exception as e:
@@ -223,29 +258,29 @@ def place_no_order(client: ClobClient, token_id: str,
 def sell_no_position(client: ClobClient, token_id: str,
                      amount_tokens: float, min_price: float) -> Optional[dict]:
     """
-    Vend amount_tokens de tokens NO via CLOB V2.
+    Vend amount_tokens de tokens NO via CLOB V2 (ordre FAK).
+    FAK remplit ce qui est disponible côté bid, annule le reste.
 
-    Pour les ordres de VENTE, 'amount' est le nombre de tokens à vendre
-    (et non des USDC). min_price est fourni à titre informatif dans les logs ;
-    l'ordre FOK sera exécuté au meilleur bid disponible.
+    Pour les ordres de VENTE, 'amount' est le nombre de tokens à vendre.
+    min_price est fourni à titre informatif dans les logs.
 
     Args:
         token_id      : token_id du token NO
         amount_tokens : nombre de tokens NO à vendre
-        min_price     : prix minimum souhaité (non garanti en FOK, juste loggé)
+        min_price     : prix minimum souhaité (non garanti en FAK, juste loggé)
     """
     amount_tokens = max(round(amount_tokens, 6), 0.000001)
 
     try:
         resp = client.create_and_post_market_order(
-            order_args  = MarketOrderArgs(
+            order_args = MarketOrderArgs(
                 token_id   = token_id,
                 amount     = amount_tokens,
                 side       = Side.SELL,
-                order_type = OrderType.FOK,
+                order_type = OrderType.FAK,
             ),
-            options     = PartialCreateOrderOptions(tick_size="0.01"),
-            order_type  = OrderType.FOK,
+            options    = PartialCreateOrderOptions(tick_size="0.01"),
+            order_type = OrderType.FAK,
         )
         logger.success(
             f"  Vente NO : token={token_id[:15]}...  "

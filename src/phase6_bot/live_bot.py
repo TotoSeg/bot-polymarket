@@ -233,21 +233,11 @@ def run_once(dry_run: bool = False):
     logger.info(f"Positions résolues ce cycle : {nb_closed}")
 
     # ── 3. Synchroniser le capital avec le vrai solde wallet ─────────────────
+    # capital_disponible = solde USDC réel. C'est toujours la source de vérité.
     if not dry_run and client:
         real_balance = get_usdc_balance(client)
-        if real_balance > 0:
-            delta = round(real_balance - portfolio["capital_disponible"], 2)
-            # total_depose n'est JAMAIS auto-incrémenté : les résolutions/ventes font
-            # remonter le wallet mais ne sont pas des dépôts externes.
-            # L'utilisateur met à jour total_depose manuellement en cas de vrai dépôt.
-            if delta > 5.0:
-                logger.info(f"Écart wallet détecté : +{delta:.2f} USDC "
-                            f"(résolution non capturée ou dépôt externe — "
-                            f"mettre total_depose à jour manuellement si dépôt)")
-            elif delta < -1.0:
-                logger.warning(f"Retrait ou écart négatif détecté : {delta:.2f} USDC")
-            portfolio["capital_disponible"] = round(real_balance, 2)
-            logger.info(f"Solde USDC wallet : {real_balance:.2f} USDC")
+        portfolio["capital_disponible"] = round(real_balance, 2)
+        logger.info(f"Solde USDC wallet : {real_balance:.2f} USDC")
 
     # ── 4. Scanner les marchés S3 + SP ───────────────────────────────────────
     logger.info("Scan des marchés actifs (S3 + SP)...")
@@ -553,13 +543,14 @@ def cmd_create_keys():
 
 
 def cmd_status():
+    portfolio = load_portfolio(PORTFOLIO_FILE)
     try:
         client  = build_client()
         balance = get_usdc_balance(client)
+        portfolio["capital_disponible"] = round(balance, 2)
         logger.info(f"Solde USDC wallet : {balance:.2f} USDC")
     except Exception as e:
         logger.warning(f"Solde non disponible (clés API requises) : {e}")
-    portfolio = load_portfolio(PORTFOLIO_FILE)
     print_summary(portfolio)
 
 

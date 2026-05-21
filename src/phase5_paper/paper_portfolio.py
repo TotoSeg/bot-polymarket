@@ -203,9 +203,18 @@ def print_summary(portfolio: dict):
     capital_init = portfolio["capital_initial"]
     capital_dispo = portfolio["capital_disponible"]
 
-    # Capital engagé dans les positions ouvertes
+    # Capital engagé = USDC payé pour ouvrir les positions (coût réel)
     capital_engage = sum(p["bet_amount"] for p in ouvert.values())
-    capital_total  = capital_dispo + capital_engage
+
+    # Valeur face des positions ouvertes = tokens détenus × 1$ (payout si NO gagne)
+    # C'est ce que Polymarket affiche comme valeur du portefeuille
+    valeur_face = sum(
+        p["bet_amount"] / max(1.0 - p.get("entry_price_yes", 0.5), 0.001)
+        for p in ouvert.values()
+    )
+
+    # Valeur totale Polymarket = liquidités + valeur face positions
+    valeur_polymarket = capital_dispo + valeur_face
 
     # P&L clos
     pnl_clos = sum(t["profit_net"] for t in clos) if clos else 0
@@ -213,17 +222,18 @@ def print_summary(portfolio: dict):
     nb_total = len(clos)
     wr       = nb_wins / nb_total * 100 if nb_total > 0 else 0
 
-    # ROI basé sur le total des dépôts (pas seulement le capital initial)
+    # ROI basé sur le total des dépôts
     total_depose = portfolio.get("total_depose", capital_init)
-    roi_pct = (capital_total - total_depose) / total_depose * 100 if total_depose > 0 else 0
+    roi_pct = (valeur_polymarket - total_depose) / total_depose * 100 if total_depose > 0 else 0
 
     logger.info("\n" + "=" * 60)
     logger.info("PORTEFEUILLE LIVE")
     logger.info("=" * 60)
     logger.info(f"  Total versé          : {total_depose:>10.2f}$")
-    logger.info(f"  Capital total        : {capital_total:>10.2f}$")
-    logger.info(f"  Capital disponible   : {capital_dispo:>10.2f}$")
-    logger.info(f"  Capital engagé       : {capital_engage:>10.2f}$ ({len(ouvert)} positions)")
+    logger.info(f"  Valeur portefeuille  : {valeur_polymarket:>10.2f}$  ← correspond à Polymarket")
+    logger.info(f"  Capital disponible   : {capital_dispo:>10.2f}$  (USDC liquide)")
+    logger.info(f"  Positions ouvertes   : {valeur_face:>10.2f}$  (valeur face, {len(ouvert)} pos.)")
+    logger.info(f"  Coût positions       : {capital_engage:>10.2f}$  (USDC investi)")
     logger.info(f"  P&L réalisé          : {pnl_clos:>+10.2f}$")
     logger.info(f"  ROI (sur versements) : {roi_pct:>+9.2f}%")
     logger.info(f"  Trades clos          : {nb_total:>10,}")

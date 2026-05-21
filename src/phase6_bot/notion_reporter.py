@@ -41,7 +41,7 @@ _PORTFOLIO_FILE = Path(__file__).resolve().parents[2] / "outputs" / "phase6" / "
 
 def _parse_end_date_local(m: dict) -> Optional[str]:
     """Extrait la date de résolution d'un marché et retourne 'YYYY-MM-DD' ou None."""
-    raw = m.get("endDate") or m.get("end_date_iso") or ""
+    raw = m.get("endDate") or m.get("endDateIso") or ""
     if not raw:
         return None
     try:

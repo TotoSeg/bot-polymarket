@@ -44,9 +44,9 @@ def _is_sport(q: str) -> bool:
 
 
 def _parse_end_date(m: dict):
-    """Identique à live_bot : essaie endDate puis end_date_iso."""
+    """Identique à live_bot : essaie endDate puis endDateIso."""
     FAR = datetime(9999, 12, 31, tzinfo=timezone.utc)
-    raw = m.get("endDate") or m.get("end_date_iso") or ""
+    raw = m.get("endDate") or m.get("endDateIso") or ""
     if not raw:
         return FAR
     try:
@@ -76,14 +76,6 @@ def main():
 
     markets = get_active_markets(min_volume=500, max_pages=30)
 
-    # ── DEBUG : afficher les clés et prix du premier marché ──────────────────
-    if markets:
-        m0 = markets[0]
-        print(f"\n[DEBUG] Premier marché : {str(m0.get('question',''))[:60]}")
-        price_fields = {k: v for k, v in m0.items()
-                        if any(x in k.lower() for x in ["price", "outcome", "token"])}
-        print(f"[DEBUG] Champs prix    : {price_fields}")
-        print(f"[DEBUG] parse_yes_price → {parse_yes_price(m0)}\n")
 
     # ── Comptes intermédiaires pour diagnostic ───────────────────────────────
     n_total = len(markets)

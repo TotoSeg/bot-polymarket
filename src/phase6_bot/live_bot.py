@@ -90,7 +90,7 @@ def calc_expected_gain_pct(win_rate: float, yes_price: float) -> float:
 def parse_end_date(m: dict) -> datetime:
     """Extrait la date de résolution d'un marché, ou datetime 9999 si inconnue."""
     FAR_FUTURE = datetime(9999, 12, 31, tzinfo=timezone.utc)
-    raw = m.get("endDate") or m.get("end_date_iso") or ""
+    raw = m.get("endDate") or m.get("endDateIso") or ""
     if not raw:
         return FAR_FUTURE
     try:

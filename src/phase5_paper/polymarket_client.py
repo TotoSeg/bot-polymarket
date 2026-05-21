@@ -113,7 +113,7 @@ def get_market_by_token_id(token_id: str) -> Optional[dict]:
 
 def parse_yes_price(market: dict) -> Optional[float]:
     """Extrait le prix YES courant d'un marché."""
-    raw = market.get("outcomeePrices")
+    raw = market.get("outcomePrices")
     if raw is None:
         return None
     try:
@@ -131,7 +131,7 @@ def parse_resolution(market: dict) -> Optional[int]:
     if not market.get("closed", False):
         return None
 
-    raw = market.get("outcomeePrices")
+    raw = market.get("outcomePrices")
     if raw is None:
         return None
 

@@ -281,7 +281,10 @@ def run_once(dry_run: bool = False):
             continue
 
         sigs = check_signals(m, yp)
-        for s in sigs:
+        # S3 prioritaire : si S3 se déclenche, ignorer SP sur le même marché
+        s3 = [s for s in sigs if s["strategy"] == "S3"]
+        best_sigs = s3 if s3 else [s for s in sigs if s["strategy"] == "SP"]
+        for s in best_sigs:
             # Règle 1 : gain attendu ≥ 5%
             ev = calc_expected_gain_pct(s["win_rate_prior"], yp)
             if ev < MIN_EXPECTED_GAIN_PCT:
@@ -305,8 +308,8 @@ def run_once(dry_run: bool = False):
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
 
-        # Déjà en portefeuille (même marché, même stratégie)
-        if any(p["market_id"] == mid and p["strategy"] == strategy
+        # Déjà en portefeuille (une seule position par marché, S3 prioritaire)
+        if any(p["market_id"] == mid
                for p in portfolio["positions_ouvertes"].values()):
             continue
 

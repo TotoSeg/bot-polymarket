@@ -73,16 +73,23 @@ EARLY_CLOSE_YES_THRESHOLD = 0.01
 _CATEGORY_PRIORITY = [
     (0, ["trump", "biden", "harris", "congress", "senate", "democrat", "republican",
          "white house", "governor", "parliament", "prime minister", "chancellor",
-         "president", "politique", "political"]),                          # politique
+         "president", "political", "secretary of state", "cabinet", "minister",
+         "veto", "impeach", "approval rating", "supreme court", "judiciary",
+         "legislation", "policy ", "administration"]),                     # politique
     (1, ["ceasefire", "nato", "sanction", "coup", "invasion", "war", "treaty",
-         "nuclear", "troops", "geopolit", "diplomacy", "missile", "military",
-         "conflict", "peace deal", "peace talks"]),                        # géopolitique
-    (2, ["iran"]),                                                          # iran
+         "nuclear", "troops", "diplomacy", "missile", "military", "conflict",
+         "peace deal", "peace talks", "alliance", "embargo", "airstrike",
+         "territory", "occupation", "united nations", "un security",
+         "regime", "sovereignty", "geopolit"]),                            # géopolitique
+    (2, ["iran", "tehran", "iranian", "ayatollah", "khamenei", "irgc",
+         "persian", "nuclear deal", "jcpoa", "isfahan"]),                  # iran
     (3, ["election", "vote", "ballot", "referendum", "primary", "caucus",
-         "elect ", "polling", "constituency"]),                            # élection
+         "polling", "constituency", "runoff", "candidate", "nominee",
+         "midterm", "recount", "swing state", "turnout", "electoral"]),    # élection
     (4, ["music", "movie", "film", "award", "oscar", "grammy", "celebrity",
-         "artist", "singer", "actor", "album", "song", "culture", "tv show",
-         "television", "box office", "streaming"]),                        # culture
+         "artist", "singer", "actor", "album", "song", "tv show",
+         "television", "box office", "streaming", "netflix", "spotify",
+         "billboard", "emmy", "bafta", "golden globe", "viral"]),         # culture
 ]
 
 

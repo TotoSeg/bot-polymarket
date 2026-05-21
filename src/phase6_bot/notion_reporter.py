@@ -223,6 +223,7 @@ def update_notion_report(portfolio: dict):
     """
     Synchronise la base Notion avec les positions ouvertes du portfolio.
     Crée/met à jour les pages existantes, archive les positions fermées.
+    Si une mise à jour échoue (page supprimée manuellement etc.), recrée la page.
     """
     if not os.environ.get("NOTION_TOKEN") or not os.environ.get("NOTION_DATABASE_ID"):
         logger.debug("Notion désactivé (NOTION_TOKEN ou NOTION_DATABASE_ID absent)")
@@ -236,12 +237,26 @@ def update_notion_report(portfolio: dict):
         open_ids    = set(portfolio.get("positions_ouvertes", {}).keys())
         cached_ids  = set(cache.keys())
 
-        nb_created = nb_updated = nb_archived = 0
+        nb_created = nb_updated = nb_archived = nb_retry = 0
 
         for mid, pos in portfolio.get("positions_ouvertes", {}).items():
             if mid in cache:
-                _update_page(cache[mid], mid, pos)
-                nb_updated += 1
+                # Vérifier que la page existe encore (peut avoir été supprimée manuellement)
+                try:
+                    r = requests.get(f"{NOTION_API_URL}/pages/{cache[mid]}",
+                                     headers=_headers(), timeout=10)
+                    if r.status_code == 404:
+                        raise ValueError("page supprimée")
+                    r.raise_for_status()
+                    _update_page(cache[mid], mid, pos)
+                    nb_updated += 1
+                except Exception:
+                    # Page disparue → recréer
+                    del cache[mid]
+                    page_id = _create_page(mid, pos)
+                    if page_id:
+                        cache[mid] = page_id
+                        nb_retry += 1
             else:
                 page_id = _create_page(mid, pos)
                 if page_id:
@@ -253,8 +268,14 @@ def update_notion_report(portfolio: dict):
             nb_archived += 1
 
         _save_cache(cache)
-        logger.info(f"Notion mis à jour : {nb_created} créées, {nb_updated} mises à jour, "
-                    f"{nb_archived} archivées")
+
+        # Log visible même sans positions nouvelles
+        nb_open = len(portfolio.get("positions_ouvertes", {}))
+        capital_dispo = portfolio.get("capital_disponible", 0)
+        logger.info(f"Notion mis à jour : {nb_open} positions ouvertes | "
+                    f"capital dispo {capital_dispo:.2f}$ | "
+                    f"{nb_created} créées, {nb_updated} màj, {nb_archived} archivées"
+                    + (f", {nb_retry} recréées" if nb_retry else ""))
 
     except EnvironmentError as e:
         logger.debug(f"Notion non configuré : {e}")

@@ -63,10 +63,35 @@ POLYMARKET_FEE = 0.02
 MIN_EXPECTED_GAIN_PCT = 0.05   # 5%
 
 # Fenêtre maximale de résolution (règle 3)
-MAX_DAYS_TO_RESOLUTION = 14
+MAX_DAYS_TO_RESOLUTION = 12
 
 # Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 1% = NO gagne à 99%
 EARLY_CLOSE_YES_THRESHOLD = 0.01
+
+
+# Priorité des catégories (0 = plus prioritaire)
+_CATEGORY_PRIORITY = [
+    (0, ["trump", "biden", "harris", "congress", "senate", "democrat", "republican",
+         "white house", "governor", "parliament", "prime minister", "chancellor",
+         "president", "politique", "political"]),                          # politique
+    (1, ["ceasefire", "nato", "sanction", "coup", "invasion", "war", "treaty",
+         "nuclear", "troops", "geopolit", "diplomacy", "missile", "military",
+         "conflict", "peace deal", "peace talks"]),                        # géopolitique
+    (2, ["iran"]),                                                          # iran
+    (3, ["election", "vote", "ballot", "referendum", "primary", "caucus",
+         "elect ", "polling", "constituency"]),                            # élection
+    (4, ["music", "movie", "film", "award", "oscar", "grammy", "celebrity",
+         "artist", "singer", "actor", "album", "song", "culture", "tv show",
+         "television", "box office", "streaming"]),                        # culture
+]
+
+
+def _category_priority(question_lc: str) -> int:
+    """Retourne la priorité catégorie (0=politique … 4=culture, 5=autre)."""
+    for priority, keywords in _CATEGORY_PRIORITY:
+        if any(k in question_lc for k in keywords):
+            return priority
+    return 5
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -255,20 +280,21 @@ def run_once(dry_run: bool = False):
             if ev < MIN_EXPECTED_GAIN_PCT:
                 skipped_gain += 1
                 continue
-            candidates.append((end_dt, -s["score"], m, s, yp, ev))
+            cat_prio = _category_priority(str(m.get("question", "")).lower())
+            candidates.append((cat_prio, end_dt, -s["score"], m, s, yp, ev))
 
-    # Résolution la plus proche d'abord, score le plus élevé en cas d'ex-æquo
-    candidates.sort(key=lambda x: (x[0], x[1]))
+    # Tri : 1) priorité catégorie  2) résolution la plus proche  3) score décroissant
+    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
 
-    logger.info(f"Candidats : {len(candidates)} | Ignorés (>14j) : {skipped_14d} | "
+    logger.info(f"Candidats : {len(candidates)} | Ignorés (>{MAX_DAYS_TO_RESOLUTION}j) : {skipped_14d} | "
                 f"Ignorés (EV<5%) : {skipped_gain}")
 
     if not candidates and portfolio["capital_disponible"] > 1.0:
-        logger.info("Aucun marché éligible dans la fenêtre 14 jours. "
+        logger.info(f"Aucun marché éligible dans la fenêtre {MAX_DAYS_TO_RESOLUTION} jours. "
                     "Capital conservé, on attend l'ouverture de nouveaux marchés.")
 
     # ── 5. Placer les ordres ─────────────────────────────────────────────────
-    for end_dt, _neg_score, m, sig, yp, ev in candidates:
+    for _cat_prio, end_dt, _neg_score, m, sig, yp, ev in candidates:
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
 

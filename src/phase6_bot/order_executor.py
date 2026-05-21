@@ -192,23 +192,30 @@ def check_sell_liquidity(client: ClobClient, token_id: str,
 def _extract_filled_usdc(resp: dict, requested_usdc: float) -> float:
     """
     Extrait le montant USDC réellement exécuté depuis la réponse CLOB.
-    Essaie plusieurs noms de champs possibles selon la version du SDK.
-    Retourne `requested_usdc` si le champ n'est pas trouvé (ordre entièrement exécuté supposé).
+    Retourne 0 si aucun champ de fill trouvé (FAK tué = 0 fill).
+    Ne jamais supposer une exécution complète sans confirmation explicite.
     """
     if not isinstance(resp, dict):
-        return requested_usdc
+        return 0.0
+    # Statut explicite : cancelled/unmatched = 0 fill
+    status = str(resp.get("status", "")).lower()
+    if status in ("cancelled", "unmatched", "killed"):
+        return 0.0
     # Champs possibles selon py-clob-client-v2
     for field in ("size_matched", "matched_amount", "filled_amount", "amount_filled"):
         val = resp.get(field)
         if val is not None:
             try:
                 size = float(val)
+                if size <= 0:
+                    return 0.0
                 price = float(resp.get("price", 1.0))
                 return round(size * price, 4)
             except (TypeError, ValueError):
                 pass
-    # Si aucun champ de fill trouvé, suppose exécution complète
-    return requested_usdc
+    # Aucun champ de fill → on logge la réponse complète pour diagnostiquer
+    logger.debug(f"  Réponse FAK sans champ fill (ordre potentiellement tué) : {resp}")
+    return 0.0
 
 
 # ── Placement d'ordre achat (CLOB V2) ────────────────────────────────────────

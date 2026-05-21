@@ -16,12 +16,12 @@ Le bot scanne en continu les marchés de prédiction Polymarket, identifie ceux 
 
 ## 2. Les deux stratégies
 
-### S3 — "Rien ne va se passer"
+### S3 — "Rien ne va se passer" ← prioritaire
 
 | Paramètre | Valeur |
 |-----------|--------|
 | Filtre prix | YES entre 5 % et 10 % |
-| Marchés ciblés | Tous sauf crypto |
+| Marchés ciblés | Tous sauf crypto et sport |
 | Win rate historique | 97,7 % à 99,9 % selon le volume |
 | ROI backtest 2024–25 | +1 495 % |
 
@@ -49,25 +49,46 @@ Le bot scanne en continu les marchés de prédiction Polymarket, identifie ceux 
 - YES 10–20 % → 99,2 %
 - YES 20–35 % → 92,2 %
 
-**Mots-clés détectés :**
-`trump, biden, harris, election, congress, senate, president, democrat, republican, white house, governor, parliament, prime minister, chancellor, ceasefire, nato, sanction, coup, invasion, war, treaty, nuclear, troops`
-
-**Un marché politique à YES=7 % déclenche S3 ET SP simultanément.**
+**Règle de priorité : S3 prime sur SP.** Si un marché déclenche les deux, seul S3 est pris. SP s'applique uniquement aux marchés dont le prix YES dépasse 10 % (hors portée de S3). Une seule position par marché.
 
 ---
 
-## 3. Sizing des mises (Kelly)
+## 3. Règles de sélection des marchés
+
+| Règle | Critère |
+|-------|---------|
+| Prix YES | Entre 5 % et 35 % |
+| Exclusions | Crypto, sport (filtres textuels sur la question) |
+| Gain attendu minimum | EV ≥ 5 % — `win_rate × (yes/no) × 0,98 − (1−win_rate) ≥ 0,05` |
+| Fenêtre de résolution | Résolution dans les **12 jours** maximum |
+| Volume minimum | 500 $ |
+| Unicité | Une seule position par marché (S3 prioritaire sur SP) |
+
+**Ordre de priorité des catégories** (trié avant la date de résolution) :
+1. Politique (congress, senate, president, white house…)
+2. Géopolitique (nato, war, ceasefire, nuclear, invasion…)
+3. Iran (iran, tehran, ayatollah, irgc, jcpoa…)
+4. Élection (election, vote, ballot, primary, runoff…)
+5. Culture (music, movie, oscar, grammy, netflix…)
+6. Autre
+
+---
+
+## 4. Sizing des mises (Kelly)
 
 ```
-mise = min(capital_total × Kelly × 0.25,  5% du capital,  MAX_BET_USDC)
+mise = min(capital_total × Kelly × 0.25,  5% du capital,  MAX_BET_USDC,  capital_disponible)
 ```
 
 | Paramètre | Valeur | Rôle |
 |-----------|--------|------|
-| `MAX_BET_USDC` | **200 $** | Plafond absolu par trade (atteint quand capital > 4 000 $) |
-| `MAX_BET_PCT` | 5 % | Plafond en % du capital — contrainte réelle sous 4 000 $ |
-| `KELLY_FRACTION` | 25 % | Fraction Kelly utilisée (conservateur) |
+| `MAX_BET_USDC` | **200 $** | Plafond absolu par trade |
+| `MAX_BET_PCT` | 5 % | Plafond en % du capital total |
+| `KELLY_FRACTION` | 25 % | Fraction Kelly (conservateur) |
 | `MIN_VOLUME_USD` | 500 $ | Volume minimum du marché |
+| Minimum CLOB | 1 $ | En dessous → position non prise |
+
+**Comportement clé** : si le capital disponible est inférieur à la taille Kelly, le bot mise tout le disponible (pas de skip). Skip uniquement si le résultat < 1 $ (minimum CLOB).
 
 **Exemples concrets à 285 USDC :**
 - S3 YES=7% → ~14 $ par trade
@@ -78,23 +99,81 @@ Les mises croissent automatiquement avec le capital (effet composé).
 
 ---
 
-## 4. Cycle de trading (toutes les heures)
+## 5. Cycle de trading (toutes les heures)
 
 ```
 run_once()
-  ├── 1. Fermer les positions résolues → gains crédités au capital
-  ├── 2. Lire le vrai solde USDC → détecter les dépôts externes
-  ├── 3. Calculer capital_kelly = dispo + engagé dans les positions
-  ├── 4. Scanner ~2 700 marchés actifs (API Gamma Polymarket)
-  ├── 5. Filtrer S3 + SP (hors crypto, prix 5-35%)
-  ├── 6. Trier par date de résolution la plus proche (effet composé max)
+  ├── 1. Clôture anticipée : YES ≤ 1% → vente tokens NO si liquidité OK
+  ├── 2. Fermer les positions résolues → gains crédités au capital
+  ├── 3. Lire le vrai solde USDC → détecter les dépôts externes
+  ├── 4. Scanner ~2 800 marchés actifs (API Gamma Polymarket)
+  ├── 5. Filtrer : prix 5-35%, hors crypto/sport, EV≥5%, résolution ≤12j
+  ├── 6. Trier : catégorie → date de résolution → score
   ├── 7. Pour chaque candidat : Kelly size → liquidity check → ordre NO
   └── 8. Sauvegarder live_portfolio.json + afficher résumé P&L
 ```
 
+**Entre chaque cycle :** reporting Notion à 30 min (mise à jour automatique du tableau de bord).
+
 ---
 
-## 5. Infrastructure
+## 6. Clôture anticipée
+
+Le bot peut clore une position **avant résolution** si :
+- Le prix YES tombe à ≤ 1 % (certitude NO à 99 %)
+- ET le carnet d'ordres a assez de bids pour vendre sans P&L négatif
+
+Si la liquidité est insuffisante → le bot attend la résolution naturelle.
+
+---
+
+## 7. Mode cleanup
+
+```bash
+python src/phase6_bot/live_bot.py --cleanup
+```
+
+Ferme toutes les positions ouvertes qui satisfont **au moins une** condition :
+- EV < 5 % (calculé sur le prix d'entrée)
+- Résolution après le 31/05/2026
+- Marché en retard (endDate dépassée mais toujours ouvert)
+
+Tente une vente CLOB au meilleur prix disponible. Si aucun acheteur → affiche un message pour fermeture manuelle sur polymarket.com.
+
+---
+
+## 8. Reporting Notion
+
+Tableau de bord automatique mis à jour toutes les 30 minutes.
+
+**Colonnes à créer dans la base Notion (noms exacts) :**
+
+| Colonne | Type Notion |
+|---------|-------------|
+| `Titre` | Title |
+| `Résolution` | Date ← colonne de tri |
+| `Taille ($)` | Number |
+| `Mise ($)` | Number |
+| `Gain espéré (%)` | Number |
+| `Stratégie` | Select |
+| `YES entrée` | Number |
+| `market_id` | Text |
+
+**Configuration Notion :**
+1. https://www.notion.so/my-integrations → New integration → copier le token (`ntn_...`)
+2. Créer la base avec les colonnes ci-dessus
+3. Connecter l'intégration : `...` → Connections → Add connections
+4. Copier l'ID de la base depuis l'URL (32 caractères avant le `?`)
+5. Ajouter dans `.env` :
+```
+NOTION_TOKEN=ntn_XXXXX
+NOTION_DATABASE_ID=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+```
+6. Configurer le tri par `Résolution` ascending dans la vue Notion (une seule fois)
+
+---
+
+## 9. Infrastructure
 
 | Composant | Détail |
 |-----------|--------|
@@ -104,13 +183,11 @@ run_once()
 | RAM | 512 MB + **1 GB swap** (obligatoire) |
 | Daemon | systemd, `Restart=always`, `RestartSec=60` |
 
-⚠️ **L'Irlande est la seule région AWS européenne non bloquée par Polymarket.** Ne pas utiliser Frankfurt (Allemagne), Paris (France), Londres (UK) — tous géobloqués.
+⚠️ **L'Irlande est la seule région AWS européenne non bloquée par Polymarket.** Ne pas utiliser Frankfurt, Paris, Londres — tous géobloqués.
 
 ---
 
-## 6. Pays géobloqués par Polymarket
-
-Polymarket refuse les connexions depuis ces pays (trading impossible même avec VPN depuis ces IP) :
+## 10. Pays géobloqués par Polymarket
 
 > Australie, Belgique, Biélorussie, Burundi, Cuba, **France**, **Allemagne**, **Royaume-Uni**, **Italie**, **Pays-Bas**, Iran, Irak, Corée du Nord, Libye, Myanmar, Nicaragua, Russie, Somalie, Soudan, Syrie, **États-Unis**, Venezuela, Zimbabwe
 
@@ -118,7 +195,7 @@ Polymarket refuse les connexions depuis ces pays (trading impossible même avec 
 
 ---
 
-## 7. GUIDE COMPLET — Configurer le bot from scratch
+## 11. GUIDE COMPLET — Configurer le bot from scratch
 
 ### Étape A — Créer un wallet MetaMask
 
@@ -159,34 +236,20 @@ Polymarket refuse les connexions depuis ces pays (trading impossible même avec 
 
 ### Étape D — Générer les clés API Polymarket
 
-Les clés API permettent au bot de passer des ordres en ton nom.
-
-**D1. Installer les dépendances Python** (sur ton PC local ou le futur VPS) :
+**D1. Installer les dépendances Python** :
 ```bash
-pip install py-clob-client eth-account py-order-utils poly-eip712-structs
+pip install py-clob-client-v2 eth-account
 ```
 
 **D2. Exporter ta clé privée MetaMask** :
 - MetaMask → Account Details → Show Private Key → entrer mot de passe
 - Copier la clé (64 caractères hex)
 
-**D3. Générer la signature EIP-712** :
+**D3. Générer les clés API depuis le VPS** :
 ```bash
-# Sur ton PC, dans le dossier du projet :
-BOT_PK=0xTA_CLE_PRIVEE python gen_sig.py
+cd ~/bot-polymarket && source .venv/bin/activate
+python src/phase6_bot/live_bot.py --create-keys
 ```
-Le script affiche une commande `fetch(...)` à copier.
-
-**D4. Exécuter le fetch dans le navigateur** :
-1. Activer le VPN (pays non bloqué)
-2. Aller sur `polymarket.com` dans Firefox/Chrome
-3. Ouvrir la console développeur : **F12** → onglet **Console**
-4. Coller et exécuter la commande `fetch(...)` générée à l'étape D3
-5. La console retourne :
-```json
-{"apiKey":"xxxx","secret":"xxxx","passphrase":"xxxx"}
-```
-**Sauvegarder ces 3 valeurs immédiatement** — elles ne sont affichées qu'une seule fois.
 
 ---
 
@@ -198,16 +261,14 @@ Le script affiche une commande `fetch(...)` à copier.
    - Platform : Linux/Unix
    - Blueprint : **Ubuntu 22.04 LTS**
    - Plan : **$5/month** (512 MB RAM)
-   - Donner un nom à l'instance
-3. Télécharger la clé SSH `.pem` (bouton SSH key pairs)
-4. Créer l'instance → attendre 1–2 minutes
-5. Dans l'onglet **Networking** : vérifier que le port 22 (SSH) est ouvert
+3. Télécharger la clé SSH `.pem`
+4. Dans l'onglet **Networking** : vérifier que le port 22 (SSH) est ouvert
 
 ---
 
 ### Étape F — Déployer le bot sur le VPS
 
-**F1. Se connecter en SSH** (depuis terminal ou PowerShell) :
+**F1. Se connecter en SSH** :
 ```bash
 ssh -i /chemin/vers/cle.pem ubuntu@IP_DU_VPS
 ```
@@ -220,8 +281,7 @@ sudo apt-get update -q && sudo apt-get install -y python3.10-venv python3-pip gi
 **F3. Cloner le code** :
 ```bash
 git clone -b phase/5-paper https://github.com/TotoSeg/bot-polymarket.git ~/bot-polymarket
-cd ~/bot-polymarket
-mkdir -p outputs/phase6 logs
+cd ~/bot-polymarket && mkdir -p outputs/phase6 logs
 ```
 
 **F4. Créer l'environnement Python** :
@@ -240,8 +300,11 @@ POLYMARKET_PRIVATE_KEY=0xTA_CLE_PRIVEE_64_CHARS
 POLYMARKET_API_KEY=ta_api_key
 POLYMARKET_API_SECRET=ton_api_secret
 POLYMARKET_API_PASSPHRASE=ta_passphrase
+POLYMARKET_PROXY_WALLET=0xTON_ADRESSE_PROXY
 MAX_BET_USDC=200
 MIN_VOLUME_USD=500
+NOTION_TOKEN=ntn_XXXXX
+NOTION_DATABASE_ID=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 Sauvegarder : **Ctrl+O** → **Entrée** → **Ctrl+X**
 
@@ -249,7 +312,7 @@ Sauvegarder : **Ctrl+O** → **Entrée** → **Ctrl+X**
 ```bash
 cat > ~/bot-polymarket/outputs/phase6/live_portfolio.json << 'EOF'
 {
-  "capital_initial": 0.0,
+  "capital_initial": MONTANT_DEPOSE,
   "capital_disponible": MONTANT_DEPOSE,
   "total_depose": MONTANT_DEPOSE,
   "positions_ouvertes": {},
@@ -257,9 +320,7 @@ cat > ~/bot-polymarket/outputs/phase6/live_portfolio.json << 'EOF'
 }
 EOF
 ```
-⚠️ Remplacer `MONTANT_DEPOSE` par le montant exact déposé sur Polymarket (ex: `285.0`)
-
-> **Pourquoi mettre le montant manuellement ?** Polymarket utilise un système pUSD interne (proxy wallet). La lecture automatique du solde retourne 0. Le bot utilise `capital_disponible` du JSON pour calculer les mises. À chaque nouveau dépôt, mettre à jour manuellement ce chiffre.
+⚠️ Remplacer `MONTANT_DEPOSE` par le montant exact déposé (ex: `285.0`)
 
 **F7. Installer le service systemd et le swap** :
 ```bash
@@ -281,19 +342,26 @@ sudo systemctl status polymarket-bot --no-pager
 
 ### Étape G — Vérifier le premier cycle
 
-Attendre 60 minutes (ou relancer `sudo systemctl restart polymarket-bot` pour déclencher immédiatement), puis :
+Le bot attend 1 heure avant le premier cycle automatique. Pour déclencher immédiatement un cycle manuel :
 ```bash
-journalctl -u polymarket-bot -n 100 --no-pager
+cd ~/bot-polymarket && source .venv/bin/activate
+python src/phase6_bot/live_bot.py
+```
+
+Vérifier les logs :
+```bash
+journalctl -u polymarket-bot -n 50 --no-pager
 ```
 
 Lignes à chercher :
-- `SUCCESS | [ENTREE]` → ordre placé ✅
-- `ERROR 403 geoblock` → VPS dans un pays bloqué ❌ (changer de région)
-- `Candidats trouvés : X signaux` → bot fonctionne, cherche des opportunités ✅
+- `[ENTREE]` → ordre placé ✅
+- `Candidats : X` → bot fonctionne ✅
+- `Notion mis à jour` → reporting Notion actif ✅
+- `ERROR 403 geoblock` → VPS dans un pays bloqué ❌
 
 ---
 
-## 8. Surveillance quotidienne
+## 12. Surveillance quotidienne
 
 ```bash
 # Connexion SSH
@@ -309,32 +377,30 @@ journalctl -u polymarket-bot -f
 cd ~/bot-polymarket && source .venv/bin/activate
 python src/phase6_bot/live_bot.py --status
 
-# Mise à jour code
+# Mise à jour code + redémarrage
 cd ~/bot-polymarket && git pull origin phase/5-paper && sudo systemctl restart polymarket-bot
 
-# Redémarrage
-sudo systemctl restart polymarket-bot
+# Cycle immédiat (sans attendre l'heure)
+python src/phase6_bot/live_bot.py
+
+# Cleanup des positions hors critères
+python src/phase6_bot/live_bot.py --cleanup
+
+# Analyse des marchés disponibles par fenêtre de temps
+python src/phase6_bot/analyze_windows.py
 ```
 
 ---
 
-## 9. Ajouter des fonds
+## 13. Ajouter des fonds
 
-1. Transférer des USDC supplémentaires depuis Binance → MetaMask (Polygon)
-2. Se connecter sur polymarket.com (avec VPN si depuis France) → Deposit
-3. **Mettre à jour manuellement** `capital_disponible` et `total_depose` dans le portfolio :
-```bash
-# Lire le portfolio actuel
-cat ~/bot-polymarket/outputs/phase6/live_portfolio.json
-
-# Mettre à jour (exemple : ajout de 200 USDC, total 485)
-# Modifier capital_disponible et total_depose dans le fichier
-nano ~/bot-polymarket/outputs/phase6/live_portfolio.json
-```
+1. Transférer des USDC depuis Binance → MetaMask (Polygon)
+2. Se connecter sur polymarket.com (avec VPN depuis France) → Deposit
+3. Le bot détecte automatiquement le dépôt via la synchro du solde wallet au prochain cycle
 
 ---
 
-## 10. Résumé P&L (affiché à chaque cycle)
+## 14. Résumé P&L (affiché à chaque cycle)
 
 ```
   Total versé         :     285.00$    ← somme de tous les dépôts
@@ -349,62 +415,51 @@ nano ~/bot-polymarket/outputs/phase6/live_portfolio.json
 
 ---
 
-## 11. Transférer le bot à quelqu'un avec son propre wallet
-
-Le bot est conçu pour fonctionner avec n'importe quel wallet. La nouvelle personne doit :
-
-1. **Suivre le Guide complet** (sections A à G ci-dessus) avec son propre wallet MetaMask
-2. **Cloner le repo GitHub** : `https://github.com/TotoSeg/bot-polymarket` — code 100% public, aucun secret dedans
-3. **Générer ses propres clés API** Polymarket (étape D) avec sa clé privée
-4. **Créer son propre VPS** en Irlande
-5. **NE PAS utiliser** les clés API ou la clé privée d'un autre wallet
-
-Chaque wallet est indépendant. Il n'y a rien à "transférer" du wallet actuel vers un nouveau — les secrets ne se partagent pas.
-
----
-
-## 12. Fichiers critiques sur le VPS
+## 15. Fichiers critiques sur le VPS
 
 | Fichier | Rôle |
 |---------|------|
-| `~/bot-polymarket/src/phase6_bot/.env` | Clé privée + clés API (**JAMAIS sur GitHub**) |
+| `~/bot-polymarket/src/phase6_bot/.env` | Clé privée + clés API + Notion (**JAMAIS sur GitHub**) |
 | `~/bot-polymarket/outputs/phase6/live_portfolio.json` | Portefeuille (trades, P&L, capital) |
+| `~/bot-polymarket/outputs/phase6/notion_page_ids.json` | Cache Notion (market_id → page_id) |
 | `/etc/systemd/system/polymarket-bot.service` | Service daemon (relance auto) |
 | `~/bot-polymarket/logs/` | Logs journaliers |
 | `/swapfile` | Swap 1 GB (stabilité RAM) |
 
 ---
 
-## 13. Supprimer toutes les traces (PC de développement)
+## 16. Transférer le bot à quelqu'un avec son propre wallet
 
-```
-C:\Users\ThomasSegond\Desktop\Claude Code\Bot Polymarket\    ← dossier projet
-C:\Users\ThomasSegond\.claude\projects\c--Users-...         ← mémoire Claude
-C:\Users\ThomasSegond\key.pem                               ← clé SSH
-```
-```powershell
-Remove-Item (Get-PSReadlineOption).HistorySavePath           # historique PowerShell
-```
-⚠️ Supprimer la clé SSH = perte d'accès SSH au VPS. Créer d'abord une nouvelle clé si nécessaire.
+1. **Suivre le Guide complet** (sections A à G) avec son propre wallet MetaMask
+2. **Cloner le repo GitHub** : `https://github.com/TotoSeg/bot-polymarket` — code 100% public
+3. **Générer ses propres clés API** Polymarket avec sa clé privée
+4. **Créer son propre VPS** en Irlande
+5. **NE PAS utiliser** les clés API ou la clé privée d'un autre wallet
 
 ---
 
-## 14. Questions fréquentes
+## 17. Questions fréquentes
 
-**Q : Pourquoi le solde USDC affiche 0 dans les logs ?**
-R : Polymarket utilise un système pUSD interne. La lecture automatique du solde ne fonctionné pas avec ce système. Le bot utilise `capital_disponible` du fichier JSON — à mettre à jour manuellement à chaque dépôt.
+**Q : Le bot prend-il plusieurs positions sur le même marché ?**
+R : Non. Une seule position par marché. Si S3 et SP se déclenchent tous les deux, seul S3 est pris.
+
+**Q : Pourquoi le bot n'ouvre pas de nouvelles positions ?**
+R : Soit le capital disponible est < 1$ (minimum CLOB), soit aucun marché ne satisfait les critères dans la fenêtre de 12 jours. Lancer `python src/phase6_bot/analyze_windows.py` pour diagnostiquer.
+
+**Q : Les fonds arrivent-ils automatiquement après résolution d'un marché ?**
+R : Oui. Polymarket crédite automatiquement les tokens gagnants. Le bot met à jour sa comptabilité au cycle suivant.
+
+**Q : Pourquoi le solde USDC affiche parfois 0 dans les logs ?**
+R : Polymarket utilise un proxy wallet pUSD. En cas d'échec de lecture, le bot continue avec le solde connu du portfolio JSON.
 
 **Q : Le bot peut perdre de l'argent ?**
 R : Oui. Les win rates (92–99%) sont des moyennes sur 2 ans. Sur 10 trades, 1–2 pertes sont possibles. Kelly limite chaque mise à 5% du capital.
 
 **Q : VPN toujours nécessaire ?**
-R : Uniquement pour accéder à polymarket.com depuis la France (dépôt, retrait, génération de clés API). Le bot lui-même tourne sur un VPS irlandais — pas de VPN nécessaire sur le VPS.
+R : Uniquement pour accéder à polymarket.com depuis la France (dépôt, retrait, génération de clés API). Le bot tourne sur un VPS irlandais — pas de VPN sur le VPS.
 
 **Q : Les clés API expirent ?**
 R : Non. Si régénérées, les anciennes sont révoquées. Mettre à jour `.env` et redémarrer le service.
 
 **Q : Le bot tourne si mon PC est éteint ?**
 R : Oui — il tourne sur le VPS AWS 24h/24, totalement indépendant.
-
-**Q : Comment voir mes positions en direct ?**
-R : Sur polymarket.com avec ton wallet connecté (positions + P&L flottant en temps réel).

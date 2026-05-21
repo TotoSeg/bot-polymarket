@@ -283,11 +283,12 @@ def run_once(dry_run: bool = False):
             if ev < MIN_EXPECTED_GAIN_PCT:
                 skipped_gain += 1
                 continue
-            cat_prio = _category_priority(str(m.get("question", "")).lower())
-            candidates.append((cat_prio, end_dt, -s["score"], m, s, yp, ev))
+            cat_prio      = _category_priority(str(m.get("question", "")).lower())
+            strategy_prio = 0 if s["strategy"] == "S3" else 1  # S3 avant SP
+            candidates.append((cat_prio, strategy_prio, end_dt, -s["score"], m, s, yp, ev))
 
-    # Tri : 1) priorité catégorie  2) résolution la plus proche  3) score décroissant
-    candidates.sort(key=lambda x: (x[0], x[1], x[2]))
+    # Tri : 1) priorité catégorie  2) S3 avant SP  3) résolution la plus proche  4) score décroissant
+    candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
 
     logger.info(f"Candidats : {len(candidates)} | Ignorés (>{MAX_DAYS_TO_RESOLUTION}j) : {skipped_14d} | "
                 f"Ignorés (EV<5%) : {skipped_gain}")
@@ -297,7 +298,7 @@ def run_once(dry_run: bool = False):
                     "Capital conservé, on attend l'ouverture de nouveaux marchés.")
 
     # ── 5. Placer les ordres ─────────────────────────────────────────────────
-    for _cat_prio, end_dt, _neg_score, m, sig, yp, ev in candidates:
+    for _cat_prio, _strategy_prio, end_dt, _neg_score, m, sig, yp, ev in candidates:
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
 

@@ -130,8 +130,8 @@ def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bo
                     float(a["price"] if isinstance(a, dict) else a.price)
                     for a in asks)
         nb_levels = len(asks)
-        logger.debug(f"  Liquidité {token_id[:12]} : {total:.2f}$ sur {nb_levels} niveaux "
-                     f"(best ask={best_ask:.4f}) pour {amount_usdc:.2f}$ demandés")
+        logger.info(f"  Liquidité {token_id[:12]} : {total:.2f}$ sur {nb_levels} niveaux "
+                    f"(best_ask={best_ask:.4f}) pour {amount_usdc:.2f}$ demandés")
         if total < amount_usdc * 0.95:
             logger.warning(f"Liquidité insuffisante : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
             return False

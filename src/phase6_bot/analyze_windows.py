@@ -36,7 +36,11 @@ _KW_SPORT = [
     " fc ", "batting", "pitcher", "quarterback",
 ]
 
-WINDOWS = [("48h",48),("72h",72),("96h",96),("5j",120),("7j",168),("14j",336),("30j",720)]
+WINDOWS = [
+    ("48h", 48), ("72h", 72), ("96h", 96), ("5j", 120), ("6j", 144), ("7j", 168),
+    ("8j", 192), ("9j", 216), ("10j", 240), ("11j", 264), ("12j", 288), ("13j", 312), ("14j", 336),
+    ("30j", 720),
+]
 
 
 def _is_sport(q: str) -> bool:
@@ -147,17 +151,35 @@ def main():
 
     print("=" * 55)
 
-    # ── Détail des 20 premiers marchés éligibles ─────────────────────────────
-    if eligible:
-        print(f"\n20 premiers marchés éligibles (sur {len(eligible)}) :")
-        print(f"{'Strat':<5} {'YES':>5} {'Bet':>6} {'Heures':>7}  Question")
+    # ── Types de marchés scannés ─────────────────────────────────────────────
+    from collections import Counter
+    from src.phase5_paper.strategy_signals import _category
+    strats   = Counter(e["strategy"] for e in eligible)
+    cats_raw = []
+    for m in markets:
+        q  = str(m.get("question","")).lower()
+        yp = parse_yes_price(m)
+        if not yp or not (0.05 <= yp <= 0.35): continue
+        if _is_crypto(q) or _is_sport(q): continue
+        cats_raw.append(_category(q))
+    cats = Counter(cats_raw)
+
+    print(f"\nTypes de marchés éligibles (478 total) :")
+    print(f"  S3 (YES 5-10%, hors crypto/sport) : {strats.get('S3', 0)}")
+    print(f"  SP (YES 5-35%, politique/géopol)  : {strats.get('SP', 0)}")
+    print(f"  Catégories :")
+    for cat, n in cats.most_common():
+        print(f"    {cat:<25} : {n}")
+
+    # ── Zoom 7-14j ───────────────────────────────────────────────────────────
+    zoom = [e for e in eligible if 168 < e["hours"] <= 336]
+    if zoom:
+        print(f"\nDétail {len(zoom)} marchés dans la fenêtre 7-14j :")
+        print(f"{'Strat':<5} {'YES':>5} {'Bet':>6} {'Fin':>12}  Question")
         print("-" * 75)
-        for e in eligible[:20]:
-            print(f"{e['strategy']:<5} {e['yp']:>5.3f} {e['bet']:>5.2f}$ {e['hours']:>6.0f}h  "
-                  f"{e['end_dt'].strftime('%m-%d %H:%M')}  {e['question'][:40]}")
-    else:
-        print("\nAucun marché éligible trouvé.")
-        print("Vérifie que le filtre sport n'est pas trop agressif (voir compteurs ci-dessus).")
+        for e in zoom:
+            print(f"{e['strategy']:<5} {e['yp']:>5.3f} {e['bet']:>5.2f}$  "
+                  f"{e['end_dt'].strftime('%Y-%m-%d')}  {e['question'][:42]}")
 
 
 if __name__ == "__main__":

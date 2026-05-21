@@ -274,9 +274,11 @@ def run_once(dry_run: bool = False):
         if not yp or not (0.05 <= yp <= 0.35):
             continue
 
-        # Règle 3 : résolution dans les 14 jours
+        # Règle 3 : résolution dans la fenêtre [maintenant, +12j]
+        # end_dt < now_utc = marché expiré non résolu (overdue) → skip
+        # end_dt > window_cutoff = résolution trop lointaine → skip
         end_dt = parse_end_date(m)
-        if end_dt > window_cutoff:
+        if end_dt < now_utc or end_dt > window_cutoff:
             skipped_14d += 1
             continue
 

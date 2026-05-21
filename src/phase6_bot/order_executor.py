@@ -104,23 +104,38 @@ def get_no_token_id(market: dict) -> Optional[str]:
 # ── Vérification de liquidité (achat) ───────────────────────────────────────
 
 def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bool:
-    """Vérifie qu'au moins 50% de la mise est couverte par le carnet d'ordres (côté achat NO)."""
+    """
+    Vérifie que le carnet d'ordres peut absorber la mise en totalité (seuil 95%).
+    Rejette aussi si le best ask dépasse 0.99 (prix NO trop élevé → ordre invalide CLOB).
+    """
     try:
         book = client.get_order_book(token_id)
         if isinstance(book, dict):
             asks = book.get("asks") or []
         else:
             asks = book.asks or []
+
+        if not asks:
+            logger.warning(f"Carnet vide pour token {token_id[:12]}...")
+            return False
+
+        # Vérifier que le best ask ne dépasse pas 0.99 (max CLOB)
+        best_ask = min(float(a["price"] if isinstance(a, dict) else a.price) for a in asks)
+        if best_ask > 0.99:
+            logger.warning(f"Best ask NO = {best_ask:.4f} > 0.99 (marché trop proche de résolution)")
+            return False
+
+        # FOK exige couverture complète : seuil 95% pour absorber les micro-écarts
         total = sum(float(a["size"] if isinstance(a, dict) else a.size) *
                     float(a["price"] if isinstance(a, dict) else a.price)
                     for a in asks)
-        if total < amount_usdc * 0.5:
-            logger.warning(f"Liquidité faible : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
+        if total < amount_usdc * 0.95:
+            logger.warning(f"Liquidité insuffisante : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
             return False
         return True
     except Exception as e:
         logger.warning(f"Impossible de lire l'order book : {e}")
-        return True   # en cas d'erreur API, on tente quand même
+        return False  # par prudence, ne pas tenter si on ne peut pas vérifier
 
 
 # ── Vérification de liquidité (vente) ───────────────────────────────────────

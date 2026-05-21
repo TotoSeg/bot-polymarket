@@ -11,7 +11,7 @@ Configuration requise dans .env :
 Colonnes Notion à créer (noms exacts) :
     Titre          → Title      (question du marché)
     Mise ($)       → Number     (USDC investi à l'entrée)
-    Gain espéré ($)→ Number     (EV en $ si NO gagne)
+    Gain espéré (%)→ Number     (EV en % de la mise)
     Résolution     → Date       (date de clôture du marché — colonne de tri)
     Stratégie      → Select     (S3 ou SP)
     YES entrée     → Number     (prix YES au moment de l'entrée)
@@ -54,17 +54,16 @@ def _parse_end_date_local(m: dict) -> Optional[str]:
         return None
 
 
-def _expected_gain_usd(pos: dict) -> float:
-    """Gain espéré en $ = mise × EV."""
-    bet      = pos.get("bet_amount", 0.0)
-    wr       = pos.get("win_rate_prior", 0.97)
-    yes_p    = pos.get("entry_price_yes", 0.07)
-    no_p     = 1.0 - yes_p
-    if no_p <= 0 or bet <= 0:
+def _expected_gain_pct(pos: dict) -> float:
+    """Gain espéré en % de la mise (EV × 100)."""
+    wr    = pos.get("win_rate_prior", 0.97)
+    yes_p = pos.get("entry_price_yes", 0.07)
+    no_p  = 1.0 - yes_p
+    if no_p <= 0:
         return 0.0
     gain_win = (yes_p / no_p) * (1.0 - POLYMARKET_FEE)
     ev       = wr * gain_win - (1.0 - wr) * 1.0
-    return round(bet * ev, 2)
+    return round(ev * 100, 1)
 
 
 def _headers() -> dict:
@@ -145,13 +144,12 @@ def _enrich_resolution_dates(portfolio: dict) -> bool:
 def _build_page_properties(pos: dict, market_id: str) -> dict:
     question        = pos.get("question", "")[:100]
     bet_amount      = pos.get("bet_amount", 0.0)
-    gain_espere     = _expected_gain_usd(pos)
+    gain_espere_pct = _expected_gain_pct(pos)
     strategy        = pos.get("strategy", "")
     yes_price       = pos.get("entry_price_yes", 0.0)
     resolution_date = pos.get("resolution_date", "")
 
-    # Taille totale = nombre de tokens NO × 1$ = ce que Polymarket affiche
-    # = Mise / (1 - YES_entrée) = montant récupéré si NO gagne
+    # Taille = tokens NO détenus × 1$ face value = ce que Polymarket affiche
     no_price = 1.0 - yes_price
     taille   = round(bet_amount / no_price, 2) if no_price > 0 else 0.0
 
@@ -165,8 +163,8 @@ def _build_page_properties(pos: dict, market_id: str) -> dict:
         "Mise ($)": {
             "number": round(bet_amount, 2)
         },
-        "Gain espéré ($)": {
-            "number": gain_espere
+        "Gain espéré (%)": {
+            "number": gain_espere_pct
         },
         "Stratégie": {
             "select": {"name": strategy} if strategy else None

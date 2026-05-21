@@ -367,6 +367,12 @@ def run_once(dry_run: bool = False):
 
     logger.info(f"Nouvelles positions : {nb_new} | Skipped : {skipped}")
 
+    # Re-synchro finale : corrige les écarts dus aux FAK partiels ou timing
+    if not dry_run and client:
+        real_balance = get_usdc_balance(client)
+        if real_balance > 0:
+            portfolio["capital_disponible"] = round(real_balance, 2)
+
     save_portfolio(portfolio, PORTFOLIO_FILE)
     print_summary(portfolio)
     logger.success("Cycle terminé.")

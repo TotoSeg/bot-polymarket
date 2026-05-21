@@ -198,18 +198,15 @@ def place_no_order(client: ClobClient, token_id: str,
     amount_usdc  = max(round(amount_usdc, 2), 1.0)        # CLOB min order = $1
 
     try:
-        # IOC (Immediate Or Cancel) : fill partiel accepté.
-        # FOK échoue si le carnet n'a pas exactement la liquidité nécessaire au moment T.
-        # IOC prend ce qui est disponible → position partielle plutôt que rien.
         resp = client.create_and_post_market_order(
             order_args  = MarketOrderArgs(
                 token_id   = token_id,
                 amount     = amount_usdc,
                 side       = Side.BUY,
-                order_type = OrderType.IOC,
+                order_type = OrderType.FOK,
             ),
             options     = PartialCreateOrderOptions(tick_size="0.01"),
-            order_type  = OrderType.IOC,
+            order_type  = OrderType.FOK,
         )
         logger.success(
             f"  Ordre NO placé : token={token_id[:15]}...  "

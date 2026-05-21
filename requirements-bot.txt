@@ -6,7 +6,7 @@ requests>=2.31.0           # Appels API Polymarket Gamma + CLOB
 websocket-client>=1.7.0    # WebSocket (optionnel, pour données temps réel)
 
 # Polymarket CLOB (ordres réels)
-py-clob-client>=0.17.0     # Client officiel Polymarket CLOB
+py-clob-client-v2          # Client Polymarket CLOB V2 (lancé avril 2026)
 eth-account>=0.11.0        # Signature ECDSA des ordres (requis par py-clob-client)
 
 # Logging et utilitaires

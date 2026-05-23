@@ -1,330 +1,249 @@
 """
 Analyse de hedge sur les marchés Bitcoin up/down 5 minutes
 ==========================================================
-Récupère les données via les APIs Polymarket (pas besoin de fichiers locaux).
 
-Sources :
-  - Gamma API  : liste des marchés Bitcoin up/down résolus
-  - Data API   : trades individuels par marché (timestamps + prix)
+Ces marchés sont déterministes : chaque fenêtre de 5 minutes génère un marché
+dont le slug est calculable directement depuis le timestamp :
+    slug = f"btc-updown-5m-{window_ts}"
+    window_ts = timestamp - (timestamp % 300)   ← arrondi à la 5min inférieure
+
+On ne peut pas les trouver via la liste générale des marchés — il faut les
+construire et les fetcher un par un.
+
+Objectif : tester si miser sur l'upsider (side majoritaire, prix > 0.5) ou
+l'underdog (side minoritaire, prix < 0.5) à différents moments avant la
+résolution génère un ROI positif.
 
 Usage :
-  python3 src/analysis/btc_5min_hedge.py
+    python3 src/analysis/btc_5min_hedge.py [--days 7] [--verify-slug]
 
-Durée estimée : 5-20 minutes selon le nombre de marchés trouvés.
+Options :
+    --days N       Analyser les N derniers jours (défaut : 7, max raisonnable : 30)
+    --verify-slug  Tester quelques slugs récents avant de lancer l'analyse complète
 """
 
-import requests
+import sys
 import time
+import argparse
+import requests
 import json
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 from pathlib import Path
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 OUTPUT_DIR = Path(__file__).resolve().parents[2] / "outputs" / "btc_hedge"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-GAMMA_URL   = "https://gamma-api.polymarket.com/markets"
-TRADES_URL  = "https://data-api.polymarket.com/trades"
+GAMMA_URL    = "https://gamma-api.polymarket.com/markets/slug"
+TRADES_URL   = "https://data-api.polymarket.com/trades"
+SESSION      = requests.Session()
+SESSION.headers.update({"User-Agent": "btc-hedge-analysis/1.0"})
 
-# Garde-fous API
-REQUEST_DELAY  = 0.3   # secondes entre chaque appel
-MAX_MARKETS    = 5000  # limite de sécurité
+REQUEST_DELAY         = 0.15   # secondes entre appels séquentiels
+MAX_WORKERS           = 8      # threads pour les fetches parallèles
 MAX_TRADES_PER_MARKET = 500
-GAMMA_MAX_OFFSET = 9900  # l'API retourne 422 au-delà de ~10000
 
-# Fenêtres temporelles (secondes avant résolution)
-WINDOWS_30S = list(range(300, 120 - 1, -30))
-WINDOWS_10S = list(range(110,  60 - 1, -10))
-WINDOWS_5S  = list(range( 55,   0 - 1,  -5))
+# Fenêtres temporelles analysées (secondes avant résolution)
+WINDOWS_30S = list(range(300, 120 - 1, -30))   # 300 270 240 210 180 150 120
+WINDOWS_10S = list(range(110,  60 - 1, -10))   # 110 100 90 80 70 60
+WINDOWS_5S  = list(range( 55,   0 - 1,  -5))   # 55 50 45 ... 10 5 0
 ALL_WINDOWS = sorted(set(WINDOWS_30S + WINDOWS_10S + WINDOWS_5S), reverse=True)
 
 
-# ── Utilitaires ──────────────────────────────────────────────────────────────
+# ── Arguments CLI ─────────────────────────────────────────────────────────────
 
-def get_json(url: str, params: dict, retries: int = 3) -> list | dict | None:
-    """GET JSON avec retry automatique."""
+parser = argparse.ArgumentParser()
+parser.add_argument("--days",        type=int,  default=7,     help="Nombre de jours d'historique")
+parser.add_argument("--verify-slug", action="store_true",      help="Tester quelques slugs récents")
+args = parser.parse_args()
+
+
+# ── Utilitaires réseau ────────────────────────────────────────────────────────
+
+def fetch_json(url: str, params: dict = None, retries: int = 3) -> dict | list | None:
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, timeout=20)
+            r = SESSION.get(url, params=params, timeout=15)
+            if r.status_code == 404:
+                return None   # marché inexistant = normal
             r.raise_for_status()
             return r.json()
         except requests.RequestException as e:
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(1.5 ** attempt)
             else:
-                print(f"    ✗ Erreur {url} params={params} : {e}")
                 return None
+    return None
 
 
-def is_btc_5min(market: dict) -> bool:
-    """Retourne True si le marché est un Bitcoin up/down de ~5 minutes."""
-    # Vrais noms de champs observés dans l'API Gamma
-    q    = (market.get("question") or "").lower()
-    slug = (market.get("slug")     or "").lower()
-    text = q + " " + slug
-
-    # Doit contenir bitcoin ou btc
-    has_btc = "bitcoin" in text or " btc " in text or "btc-" in text or "-btc" in text
-
-    # Doit contenir un indicateur directionnel
-    has_dir = any(kw in text for kw in [
-        "up or down", "up-or-down", "higher or lower", "higher-or-lower",
-        "above or below", "above-or-below", "go up", "go down",
-        "increase", "decrease", "pump", "dump", "bull", "bear",
-        "rise", "fall", "gain", "drop",
-    ])
-
-    if not (has_btc and has_dir):
-        return False
-
-    # Durée : endDateIso - createdAt (startDate absent du schéma, createdAt = proxy)
-    end   = market.get("endDateIso") or market.get("endDate")
-    start = market.get("createdAt")
-    if not end or not start:
-        return True  # si on ne peut pas calculer la durée, garder quand même
-
-    try:
-        t_start = pd.Timestamp(start, tz="UTC")
-        t_end   = pd.Timestamp(end,   tz="UTC")
-        duration_sec = (t_end - t_start).total_seconds()
-        return 60 <= duration_sec <= 900
-    except Exception:
-        return True  # en cas d'erreur de parse, garder
+def window_slug(ts: int) -> str:
+    """Calcule le slug d'un marché BTC 5min depuis un timestamp Unix."""
+    wt = ts - (ts % 300)
+    return f"btc-updown-5m-{wt}"
 
 
-# ── Étape 1 : Récupérer les marchés ──────────────────────────────────────────
+# ── Étape 0 : Vérification du format de slug ─────────────────────────────────
 
-print(f"{'='*70}")
+print("=" * 70)
 print("  ANALYSE HEDGE — BITCOIN UP/DOWN 5 MINUTES")
-print(f"{'='*70}")
-print("\n[1/4] Récupération des marchés Bitcoin up/down (Gamma API)...")
-print("  Stratégie : pagination par plages de dates pour contourner le plafond offset=10000\n")
+print("=" * 70)
 
-btc_markets = []
-seen_ids    = set()
+now_ts = int(time.time())
 
-# Pagination par plages de dates (contourne le plafond offset ~10000)
-# Couvre l'historique Polymarket de 2022 à aujourd'hui
-DATE_RANGES = [
-    ("2022-01-01", "2022-12-31"),
-    ("2023-01-01", "2023-12-31"),
-    ("2024-01-01", "2024-06-30"),
-    ("2024-07-01", "2024-12-31"),
-    ("2025-01-01", "2025-06-30"),
-    ("2025-07-01", "2025-12-31"),
-    ("2026-01-01", "2026-12-31"),
-]
+if args.verify_slug:
+    print("\n[0] Vérification du format de slug sur les 10 dernières fenêtres...\n")
+    found = 0
+    for i in range(10):
+        ts   = now_ts - i * 300
+        wt   = ts - (ts % 300)
+        slug = f"btc-updown-5m-{wt}"
+        data = fetch_json(f"{GAMMA_URL}/{slug}")
+        status = "✓ TROUVÉ" if data else "✗ absent"
+        print(f"  {slug}  →  {status}")
+        if data:
+            found += 1
+            print(f"    question : {data.get('question', '')[:65]}")
+            print(f"    outcomes : {data.get('outcomes')}")
+            print(f"    prices   : {data.get('outcomePrices')}")
+        time.sleep(0.2)
+    if found == 0:
+        print("\n  ⚠  Aucun slug trouvé. Le format est peut-être différent.")
+        print("  Essai de variantes...")
+        variants = [
+            f"bitcoin-up-down-5m-{now_ts - (now_ts % 300)}",
+            f"btc-5m-{now_ts - (now_ts % 300)}",
+            f"will-btc-be-higher-5m-{now_ts - (now_ts % 300)}",
+        ]
+        for v in variants:
+            data = fetch_json(f"{GAMMA_URL}/{v}")
+            print(f"  {v}  →  {'✓' if data else '✗'}")
+        sys.exit(0)
+    print(f"\n  Format confirmé : btc-updown-5m-{{timestamp}}")
 
-for date_start, date_end in DATE_RANGES:
-    offset = 0
-    page_size = 100
-    range_count = 0
 
-    while True:
-        if offset >= GAMMA_MAX_OFFSET:
-            print(f"  ⚠ Plafond offset atteint pour {date_start}–{date_end}, passage à la plage suivante")
-            break
+# ── Étape 1 : Générer les timestamps historiques ─────────────────────────────
 
-        params = {
-            "closed":          "true",
-            "limit":           page_size,
-            "offset":          offset,
-            "end_date_min":    date_start,
-            "end_date_max":    date_end,
-        }
-        data = get_json(GAMMA_URL, params)
-        if not data:
-            break
+print(f"\n[1/4] Génération des fenêtres sur {args.days} jours...")
 
-        page = data if isinstance(data, list) else data.get("markets", [])
-        if not page:
-            break
+end_ts   = now_ts - (now_ts % 300)            # dernière fenêtre complète
+start_ts = end_ts - args.days * 86400          # N jours en arrière
 
-        new_this_page = 0
-        for m in page:
-            mid = m.get("id") or m.get("conditionId")
-            if mid in seen_ids:
-                continue
-            seen_ids.add(mid)
-            if is_btc_5min(m):
-                btc_markets.append(m)
-                new_this_page += 1
+# Une fenêtre toutes les 300 secondes
+all_window_ts = list(range(start_ts, end_ts, 300))
+print(f"  Fenêtres à tester : {len(all_window_ts):,}  ({args.days} jours × 288 par jour)")
 
-        offset += len(page)
-        range_count += len(page)
-        total_scanned = sum(1 for _ in seen_ids)
-        print(f"  {date_start[:4]} offset={offset:>5}  scannés={total_scanned:>6}  "
-              f"BTC 5min={len(btc_markets)}", end="\r")
 
-        if len(page) < page_size:
-            break
-        time.sleep(REQUEST_DELAY)
+# ── Étape 2 : Fetcher les métadonnées des marchés en parallèle ───────────────
 
-print(f"\n\n  Total marchés Bitcoin up/down ~5min : {len(btc_markets)}")
-print(f"  Total marchés scannés             : {len(seen_ids)}")
+print(f"\n[2/4] Fetch des marchés (threads={MAX_WORKERS})...")
+print("  (chaque marché inexistant est ignoré silencieusement)\n")
 
-if len(btc_markets) == 0:
-    print("\n  ⚠ Aucun marché BTC 5min trouvé. Diagnostic :")
-    sample = get_json(GAMMA_URL, {"closed": "true", "limit": 5, "offset": 0})
-    if sample:
-        page = sample if isinstance(sample, list) else sample.get("markets", [])
-        if page:
-            print(f"  Clés dispo : {list(page[0].keys())}")
-            print(f"  Exemple question : {page[0].get('question', '')}")
-            print(f"  Exemple slug     : {page[0].get('slug', '')}")
-    import sys; sys.exit(1)
-
-# Afficher les 5 premiers exemples
-print(f"\n  Exemples :")
-for m in btc_markets[:5]:
-    q   = m.get("question", "")[:65]
-    end = m.get("endDate") or m.get("end_date_iso", "")
-    dur = ""
+def fetch_market(wt: int) -> dict | None:
+    slug = f"btc-updown-5m-{wt}"
+    data = fetch_json(f"{GAMMA_URL}/{slug}")
+    if not data:
+        return None
+    # Vérifier que c'est bien un marché résolu
+    if not data.get("closed"):
+        return None
+    # Extraire la résolution depuis outcomePrices
+    prices = data.get("outcomePrices")
+    if isinstance(prices, str):
+        try: prices = json.loads(prices)
+        except Exception: prices = None
+    if not prices or len(prices) < 2:
+        return None
     try:
-        s = pd.Timestamp(m.get("startDate") or m.get("start_date_iso"), tz="UTC")
-        e = pd.Timestamp(end, tz="UTC")
-        dur = f"{int((e-s).total_seconds())}s"
-    except Exception:
-        pass
-    print(f"    [{dur:>5}]  {q}")
+        p0, p1 = float(prices[0]), float(prices[1])
+    except (TypeError, ValueError):
+        return None
+    if p0 >= 0.99:
+        yes_won = 1.0   # Up gagne (index 0)
+    elif p1 >= 0.99:
+        yes_won = 0.0   # Down gagne (index 1)
+    else:
+        return None     # résolution ambiguë
 
-
-# ── Étape 2 : Extraire les identifiants et résolutions ───────────────────────
-
-print("\n[2/4] Extraction des métadonnées...")
-
-def extract_condition_id(m: dict) -> str | None:
-    # Vrais noms de champs de l'API Gamma
-    for key in ["conditionId", "condition_id", "id"]:
-        v = m.get(key)
-        if v:
-            return str(v)
-    ids = m.get("clobTokenIds")
-    if ids:
-        if isinstance(ids, str):
-            try: ids = json.loads(ids)
-            except Exception: pass
-        if isinstance(ids, list) and ids:
-            return str(ids[0])
-    return None
-
-def extract_resolution(m: dict) -> float | None:
-    """
-    Retourne 1.0 si YES a gagné, 0.0 si NO a gagné, None si inconnu.
-
-    Sur l'API Gamma, la résolution d'un marché fermé se lit dans outcomePrices :
-      ["1", "0"]  →  YES a gagné  (index 0 = YES)
-      ["0", "1"]  →  NO  a gagné  (index 1 = NO)
-    """
-    # Méthode principale : outcomePrices (["1","0"] ou ["0","1"])
-    prices = m.get("outcomePrices")
-    if prices:
-        if isinstance(prices, str):
-            try: prices = json.loads(prices)
-            except Exception: prices = None
-        if isinstance(prices, list) and len(prices) >= 2:
-            try:
-                p0 = float(prices[0])
-                p1 = float(prices[1])
-                if p0 >= 0.99 and p1 <= 0.01:
-                    return 1.0  # YES a gagné
-                if p1 >= 0.99 and p0 <= 0.01:
-                    return 0.0  # NO a gagné
-            except (TypeError, ValueError):
-                pass
-
-    # Fallback : champ resolution texte
-    res = m.get("resolution") or m.get("outcome")
-    if res is not None:
-        s = str(res).lower().strip()
-        if s in ("yes", "1", "1.0", "true"):  return 1.0
-        if s in ("no",  "0", "0.0", "false"): return 0.0
-
-    return None
-
-meta = []  # liste de dicts {condition_id, end_dt, yes_won, duration_sec}
-for m in btc_markets:
-    cid = extract_condition_id(m)
+    # conditionId pour fetcher les trades ensuite
+    cid = data.get("conditionId") or data.get("id")
     if not cid:
-        continue
-    res = extract_resolution(m)
-    if res is None:
-        continue  # résolution inconnue → inutilisable
+        return None
 
-    # endDateIso est le vrai nom de champ (observé dans l'API)
-    end_str   = m.get("endDateIso") or m.get("endDate") or ""
-    start_str = m.get("createdAt")  or ""
-    try:
-        end_dt   = pd.Timestamp(end_str,   tz="UTC")
-        start_dt = pd.Timestamp(start_str, tz="UTC") if start_str else end_dt - pd.Timedelta(minutes=5)
-        duration = int((end_dt - start_dt).total_seconds())
-    except Exception:
-        continue
+    end_date = data.get("endDateIso") or data.get("endDate")
+    return {
+        "condition_id": str(cid),
+        "window_ts":    wt,
+        "end_date":     end_date,
+        "yes_won":      yes_won,
+        "question":     data.get("question", "")[:60],
+        "outcomes":     data.get("outcomes"),
+    }
 
-    meta.append({
-        "condition_id": cid,
-        "end_dt":       end_dt,
-        "yes_won":      res,
-        "duration_sec": duration,
-    })
+markets = []
+errors  = 0
+completed = 0
 
-print(f"  Marchés utilisables (résolution connue) : {len(meta)}")
-if len(meta) == 0:
-    print("  ⚠  Aucun marché avec résolution connue. Vérifier le champ 'resolution' dans l'API.")
-    import sys; sys.exit(1)
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    futures = {ex.submit(fetch_market, wt): wt for wt in all_window_ts}
+    for fut in as_completed(futures):
+        completed += 1
+        result = fut.result()
+        if result:
+            markets.append(result)
+        if completed % 100 == 0:
+            print(f"  {completed}/{len(all_window_ts)}  →  {len(markets)} marchés résolus trouvés", end="\r")
+
+print(f"\n  Marchés résolus trouvés : {len(markets)}")
+
+if len(markets) == 0:
+    print("\n  ⚠  Aucun marché trouvé. Lancez avec --verify-slug pour diagnostiquer.")
+    print("  Conseil : vérifiez que le format btc-updown-5m-{ts} est correct.\n")
+    sys.exit(1)
+
+# Exemples
+print(f"\n  Exemples (5 premiers) :")
+for m in markets[:5]:
+    print(f"    [{m['window_ts']}]  {m['question']}  →  {'UP' if m['yes_won'] else 'DOWN'}")
 
 
-# ── Étape 3 : Récupérer les trades pour chaque marché ────────────────────────
+# ── Étape 3 : Fetcher les trades pour chaque marché ──────────────────────────
 
-print(f"\n[3/4] Téléchargement des trades ({len(meta)} marchés)...")
-print("  (cela peut prendre quelques minutes...)\n")
+print(f"\n[3/4] Fetch des trades ({len(markets)} marchés)...")
 
-all_trades = []  # liste de dicts {condition_id, ts, price_yes, yes_won, end_dt}
-
-for i, m in enumerate(meta):
+def fetch_trades_for_market(m: dict) -> list[dict]:
     cid    = m["condition_id"]
-    end_dt = m["end_dt"]
     yes_won = m["yes_won"]
-
-    if (i + 1) % 50 == 0 or i == 0:
-        print(f"  {i+1}/{len(meta)}  trades chargés : {len(all_trades):,}", end="\r")
+    try:
+        end_dt = pd.Timestamp(m["end_date"], tz="UTC")
+    except Exception:
+        end_dt = pd.Timestamp(m["window_ts"] + 300, unit="s", tz="UTC")
 
     params = {
-        "market":  cid,
-        "limit":   MAX_TRADES_PER_MARKET,
-        # Trades dans les 10 dernières minutes avant la résolution
-        "before":  int(end_dt.timestamp()),
-        "after":   int((end_dt - pd.Timedelta(seconds=600)).timestamp()),
+        "market": cid,
+        "limit":  MAX_TRADES_PER_MARKET,
+        "before": int(end_dt.timestamp()),
+        "after":  int((end_dt - pd.Timedelta(seconds=600)).timestamp()),
     }
-    data = get_json(TRADES_URL, params)
+    data = fetch_json(TRADES_URL, params)
     if not data:
-        time.sleep(REQUEST_DELAY)
-        continue
+        return []
 
     trades_raw = data if isinstance(data, list) else data.get("trades", [])
-    if not trades_raw:
-        time.sleep(REQUEST_DELAY)
-        continue
-
+    rows = []
     for t in trades_raw:
-        # Extraire le timestamp
         ts_val = t.get("timestamp") or t.get("created_at") or t.get("ts")
         if ts_val is None:
             continue
         try:
-            if isinstance(ts_val, (int, float)):
-                ts = pd.Timestamp(ts_val, unit="s", tz="UTC")
-            else:
-                ts = pd.Timestamp(ts_val, tz="UTC")
+            ts = pd.Timestamp(ts_val, unit="s", tz="UTC") if isinstance(ts_val, (int, float)) \
+                 else pd.Timestamp(ts_val, tz="UTC")
         except Exception:
             continue
 
-        # Extraire le prix YES
-        # quant.parquet utilise la perspective YES unifiée
-        price_val = t.get("price") or t.get("price_yes")
+        price_val = t.get("price")
         if price_val is None:
             continue
         try:
@@ -332,21 +251,20 @@ for i, m in enumerate(meta):
         except (TypeError, ValueError):
             continue
 
-        # Vérifier que c'est bien le prix YES (pas NO)
-        # Dans data-api, outcome_index=0 = YES, outcome_index=1 = NO
-        outcome_idx = t.get("outcomeIndex") or t.get("outcome_index")
-        if outcome_idx is not None:
+        # Si outcomeIndex=1 → prix du token Down → convertir en prix Up (=YES)
+        oi = t.get("outcomeIndex") or t.get("outcome_index")
+        if oi is not None:
             try:
-                if int(outcome_idx) == 1:
-                    price = 1.0 - price  # convertir en prix YES
+                if int(oi) == 1:
+                    price = 1.0 - price
             except (TypeError, ValueError):
                 pass
 
         secs_before = (end_dt - ts).total_seconds()
-        if secs_before < 0 or secs_before > 600:
+        if not (0 <= secs_before <= 600):
             continue
 
-        all_trades.append({
+        rows.append({
             "condition_id": cid,
             "ts":           ts,
             "price_yes":    price,
@@ -354,60 +272,67 @@ for i, m in enumerate(meta):
             "end_dt":       end_dt,
             "secs_before":  secs_before,
         })
+    return rows
 
-    time.sleep(REQUEST_DELAY)
+all_trades = []
+done = 0
+
+with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    futures = {ex.submit(fetch_trades_for_market, m): m for m in markets}
+    for fut in as_completed(futures):
+        rows = fut.result()
+        all_trades.extend(rows)
+        done += 1
+        if done % 50 == 0:
+            print(f"  {done}/{len(markets)} marchés  →  {len(all_trades):,} trades", end="\r")
 
 print(f"\n  Trades récupérés : {len(all_trades):,}  pour {len(set(t['condition_id'] for t in all_trades))} marchés")
 
 if len(all_trades) == 0:
-    print("  ⚠  Aucun trade récupéré. Vérifier le format de l'API data-api.polymarket.com/trades")
-    import sys; sys.exit(1)
+    print("  ⚠  Aucun trade récupéré. Vérifier l'endpoint data-api.polymarket.com/trades.")
+    sys.exit(1)
 
 df_trades = pd.DataFrame(all_trades)
+n_markets_usable = df_trades["condition_id"].nunique()
 
 
 # ── Étape 4 : Analyse par fenêtre temporelle ─────────────────────────────────
 
-print("\n[4/4] Calcul ROI par fenêtre temporelle...")
+print(f"\n[4/4] Calcul ROI sur {n_markets_usable} marchés, {len(ALL_WINDOWS)} fenêtres temporelles...")
 
 results = []
 
 for window_sec in ALL_WINDOWS:
-    # Dernier trade connu AVANT ce moment pour chaque marché
-    window_df = df_trades[df_trades["secs_before"] >= window_sec].copy()
-    if len(window_df) < 5:
+    # Dernier trade connu à au moins window_sec secondes de la fin
+    sub = df_trades[df_trades["secs_before"] >= window_sec]
+    if len(sub) < 5:
         continue
 
-    # Pour chaque marché : garder le trade le plus récent (secs_before le plus petit)
+    # Un point par marché : le trade le plus proche de la fenêtre
     last = (
-        window_df
-        .sort_values("secs_before")  # du plus proche au plus loin de la fin
-        .groupby("condition_id")
-        .first()                      # le plus récent = secs_before minimal
-        [["price_yes", "yes_won"]]
-        .reset_index()
+        sub.sort_values("secs_before")
+           .groupby("condition_id")
+           .first()
+           [["price_yes", "yes_won"]]
+           .reset_index()
     )
-
     if len(last) < 5:
         continue
 
     p_yes   = last["price_yes"].values.astype(float)
     yes_won = last["yes_won"].values.astype(float)
 
-    # Upsider = side avec prix > 0.5
+    # Upsider = side avec prix > 0.5 à cet instant
     yes_is_upsider = p_yes > 0.5
+    upsider_wins   = np.where(yes_is_upsider, yes_won == 1, yes_won == 0)
+    underdog_wins  = ~upsider_wins
 
-    # Victoires
-    upsider_wins  = np.where(yes_is_upsider, yes_won == 1, yes_won == 0)
-    underdog_wins = ~upsider_wins
+    p_up  = np.clip(np.where(yes_is_upsider, p_yes, 1.0 - p_yes), 0.01, 0.99)
+    p_dog = np.clip(1.0 - p_up, 0.01, 0.99)
 
-    # Prix des deux sides
-    p_upsider  = np.clip(np.where(yes_is_upsider, p_yes, 1.0 - p_yes), 0.01, 0.99)
-    p_underdog = np.clip(1.0 - p_upsider, 0.01, 0.99)
-
-    # ROI par trade : win_rate*(1/P - 1) - (1 - win_rate)
-    roi_up_per  = np.where(upsider_wins,  1.0/p_upsider  - 1.0, -1.0)
-    roi_dog_per = np.where(underdog_wins, 1.0/p_underdog - 1.0, -1.0)
+    # ROI : win_rate × (1/P − 1) − (1 − win_rate)
+    roi_up  = np.where(upsider_wins,  1.0/p_up  - 1.0, -1.0)
+    roi_dog = np.where(underdog_wins, 1.0/p_dog - 1.0, -1.0)
 
     results.append({
         "secs_before":      window_sec,
@@ -416,38 +341,36 @@ for window_sec in ALL_WINDOWS:
         "p_yes_std":        p_yes.std(),
         "wr_upsider":       upsider_wins.mean(),
         "wr_underdog":      underdog_wins.mean(),
-        "roi_upsider":      roi_up_per.mean(),
-        "roi_underdog":     roi_dog_per.mean(),
-        "roi_upsider_pct":  roi_up_per.mean()  * 100,
-        "roi_underdog_pct": roi_dog_per.mean() * 100,
+        "roi_upsider":      roi_up.mean(),
+        "roi_underdog":     roi_dog.mean(),
+        "roi_upsider_pct":  roi_up.mean()  * 100,
+        "roi_underdog_pct": roi_dog.mean() * 100,
     })
 
 df = pd.DataFrame(results).sort_values("secs_before", ascending=False)
 
-n_markets_usable = df_trades["condition_id"].nunique()
-
 
 # ── Tableau bilan ─────────────────────────────────────────────────────────────
 
-def secs_to_label(s):
+def fmt(s: int) -> str:
     s = int(s)
     return f"{s//60}m{s%60:02d}s" if s >= 60 else f"    {s}s"
 
-print("\n" + "=" * 106)
+print("\n" + "=" * 108)
 print("  BILAN — HEDGE SUR MARCHÉS BITCOIN UP/DOWN 5 MINUTES")
-print("=" * 106)
-print(f"\n  Marchés analysés : {n_markets_usable}  |  Fenêtres : {len(df)}\n")
+print("=" * 108)
+print(f"\n  Marchés analysés : {n_markets_usable}  |  Période : {args.days} jours  |  Fenêtres : {len(df)}\n")
 
-print(f"  {'Temps avant':>12}  {'N':>5}  {'P_yes':>6}  "
+print(f"  {'Temps avant':>12}  {'N':>5}  {'P_up':>6}  "
       f"{'WR upsider':>10}  {'ROI upsider':>11}  "
       f"{'WR underdog':>11}  {'ROI underdog':>12}")
-print("  " + "-" * 100)
+print("  " + "-" * 102)
 
 for _, row in df.iterrows():
     up_ok  = "✓" if row["roi_upsider"]  > 0 else " "
     dog_ok = "✓" if row["roi_underdog"] > 0 else " "
     print(
-        f"  {secs_to_label(row['secs_before']):>12}  "
+        f"  {fmt(row['secs_before']):>12}  "
         f"{int(row['n_markets']):>5}  "
         f"{row['p_yes_mean']:>5.1%}  "
         f"  {row['wr_upsider']:>8.1%}  "
@@ -458,84 +381,81 @@ for _, row in df.iterrows():
 
 # ── Interprétation ────────────────────────────────────────────────────────────
 
-print("\n" + "=" * 106)
+print("\n" + "=" * 108)
 print("  INTERPRÉTATION")
-print("=" * 106)
+print("=" * 108)
 
-best_up  = df.loc[df["roi_upsider"].idxmax()]
-best_dog = df.loc[df["roi_underdog"].idxmax()]
+if len(df) > 0:
+    best_up  = df.loc[df["roi_upsider"].idxmax()]
+    best_dog = df.loc[df["roi_underdog"].idxmax()]
 
-print(f"\n  Meilleur ROI upsider  : {best_up['roi_upsider_pct']:+.1f}% "
-      f"à {secs_to_label(best_up['secs_before'])} avant résolution "
-      f"(WR={best_up['wr_upsider']:.1%}, N={int(best_up['n_markets'])})")
+    print(f"\n  Meilleur ROI upsider  : {best_up['roi_upsider_pct']:+.1f}% "
+          f"à {fmt(best_up['secs_before'])} (WR={best_up['wr_upsider']:.1%}, N={int(best_up['n_markets'])})")
+    print(f"  Meilleur ROI underdog : {best_dog['roi_underdog_pct']:+.1f}% "
+          f"à {fmt(best_dog['secs_before'])} (WR={best_dog['wr_underdog']:.1%}, N={int(best_dog['n_markets'])})")
 
-print(f"  Meilleur ROI underdog : {best_dog['roi_underdog_pct']:+.1f}% "
-      f"à {secs_to_label(best_dog['secs_before'])} avant résolution "
-      f"(WR={best_dog['wr_underdog']:.1%}, N={int(best_dog['n_markets'])})")
-
-for label, col, wr_col in [("upsider", "roi_upsider", "wr_upsider"),
-                             ("underdog", "roi_underdog", "wr_underdog")]:
-    positives = df[df[col] > 0.02]
-    print(f"\n  Fenêtres avec ROI {label} > 2% : {len(positives)}")
-    for _, r in positives.iterrows():
-        print(f"    → {secs_to_label(r['secs_before']):<8}  "
-              f"ROI={r[col+'_pct']:+.1f}%  WR={r[wr_col]:.1%}  N={int(r['n_markets'])}")
+    for label, col, wr_col in [("upsider",  "roi_upsider",  "wr_upsider"),
+                                 ("underdog", "roi_underdog", "wr_underdog")]:
+        pos = df[df[col] > 0.02]
+        print(f"\n  Fenêtres avec ROI {label} > 2% : {len(pos)}")
+        for _, r in pos.iterrows():
+            print(f"    → {fmt(r['secs_before']):<8}  ROI={r[col+'_pct']:+.1f}%  "
+                  f"WR={r[wr_col]:.1%}  N={int(r['n_markets'])}")
 
 # ── Sauvegarde ────────────────────────────────────────────────────────────────
 
 csv_path = OUTPUT_DIR / "btc_5min_hedge_results.csv"
 df.to_csv(csv_path, index=False)
-print(f"\n  CSV sauvegardé : {csv_path}")
+print(f"\n  CSV : {csv_path}")
 
 # ── Graphiques ────────────────────────────────────────────────────────────────
 
-fig, axes = plt.subplots(2, 2, figsize=(16, 10))
-fig.suptitle(f"Marchés Bitcoin up/down ~5min — {n_markets_usable} marchés analysés",
-             fontsize=14, fontweight="bold")
+if len(df) >= 3:
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig.suptitle(f"Bitcoin up/down 5min — {n_markets_usable} marchés, {args.days} jours",
+                 fontsize=14, fontweight="bold")
+    x = df["secs_before"].values
 
-x = df["secs_before"].values
+    ax = axes[0, 0]
+    ax.plot(x, df["wr_upsider"]  * 100, "b-o", ms=4, label="Upsider (majoritaire)")
+    ax.plot(x, df["wr_underdog"] * 100, "r-o", ms=4, label="Underdog (minoritaire)")
+    ax.axhline(50, color="gray", ls="--", alpha=0.5, label="50%")
+    ax.set_title("Win rate"); ax.set_xlabel("Secondes avant résolution")
+    ax.set_ylabel("Win rate (%)"); ax.legend(); ax.set_xlim(max(x), 0)
+    ax.grid(True, alpha=0.3); ax.yaxis.set_major_formatter(mtick.PercentFormatter())
 
-ax = axes[0, 0]
-ax.plot(x, df["wr_upsider"]  * 100, "b-o", ms=4, label="Upsider (majoritaire)")
-ax.plot(x, df["wr_underdog"] * 100, "r-o", ms=4, label="Underdog (minoritaire)")
-ax.axhline(50, color="gray", ls="--", alpha=0.5, label="50%")
-ax.set_xlabel("Secondes avant résolution"); ax.set_ylabel("Win rate (%)")
-ax.set_title("Win rate"); ax.legend(); ax.set_xlim(max(x), 0)
-ax.grid(True, alpha=0.3); ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax = axes[0, 1]
+    ax.plot(x, df["roi_upsider_pct"],  "b-o", ms=4, label="Upsider")
+    ax.plot(x, df["roi_underdog_pct"], "r-o", ms=4, label="Underdog")
+    ax.axhline(0, color="black", lw=1.5)
+    ax.fill_between(x, df["roi_upsider_pct"],  0, where=(df["roi_upsider_pct"]  > 0), alpha=0.15, color="blue")
+    ax.fill_between(x, df["roi_underdog_pct"], 0, where=(df["roi_underdog_pct"] > 0), alpha=0.15, color="red")
+    ax.set_title("ROI moyen"); ax.set_xlabel("Secondes avant résolution")
+    ax.set_ylabel("ROI (%)"); ax.legend(); ax.set_xlim(max(x), 0)
+    ax.grid(True, alpha=0.3); ax.yaxis.set_major_formatter(mtick.PercentFormatter())
 
-ax = axes[0, 1]
-ax.plot(x, df["roi_upsider_pct"],  "b-o", ms=4, label="Upsider")
-ax.plot(x, df["roi_underdog_pct"], "r-o", ms=4, label="Underdog")
-ax.axhline(0, color="black", lw=1.5)
-ax.fill_between(x, df["roi_upsider_pct"],  0, where=(df["roi_upsider_pct"]  > 0), alpha=0.15, color="blue")
-ax.fill_between(x, df["roi_underdog_pct"], 0, where=(df["roi_underdog_pct"] > 0), alpha=0.15, color="red")
-ax.set_xlabel("Secondes avant résolution"); ax.set_ylabel("ROI moyen (%)")
-ax.set_title("ROI moyen"); ax.legend(); ax.set_xlim(max(x), 0)
-ax.grid(True, alpha=0.3); ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax = axes[1, 0]
+    ax.plot(x, df["p_yes_mean"] * 100, "g-o", ms=4)
+    ax.fill_between(x,
+                    (df["p_yes_mean"] - df["p_yes_std"]) * 100,
+                    (df["p_yes_mean"] + df["p_yes_std"]) * 100,
+                    alpha=0.15, color="green", label="±1σ")
+    ax.axhline(50, color="gray", ls="--", alpha=0.5)
+    ax.set_title("Prix Up moyen"); ax.set_xlabel("Secondes avant résolution")
+    ax.set_ylabel("Prix Up (%)"); ax.legend(); ax.set_xlim(max(x), 0)
+    ax.grid(True, alpha=0.3); ax.yaxis.set_major_formatter(mtick.PercentFormatter())
 
-ax = axes[1, 0]
-ax.plot(x, df["p_yes_mean"] * 100, "g-o", ms=4)
-ax.fill_between(x,
-                (df["p_yes_mean"] - df["p_yes_std"]) * 100,
-                (df["p_yes_mean"] + df["p_yes_std"]) * 100,
-                alpha=0.15, color="green", label="±1σ")
-ax.axhline(50, color="gray", ls="--", alpha=0.5)
-ax.set_xlabel("Secondes avant résolution"); ax.set_ylabel("Prix YES moyen (%)")
-ax.set_title("Prix YES moyen dans les 5 dernières minutes")
-ax.legend(); ax.set_xlim(max(x), 0); ax.grid(True, alpha=0.3)
-ax.yaxis.set_major_formatter(mtick.PercentFormatter())
+    ax = axes[1, 1]
+    ax.bar(range(len(x)), df["n_markets"].values, color="steelblue", alpha=0.7)
+    ax.set_xticks(range(len(x)))
+    ax.set_xticklabels([fmt(s) for s in x], rotation=90, fontsize=7)
+    ax.set_title("Marchés avec données par fenêtre")
+    ax.set_xlabel("Fenêtre"); ax.set_ylabel("N marchés"); ax.grid(True, alpha=0.3, axis="y")
 
-ax = axes[1, 1]
-ax.bar(range(len(x)), df["n_markets"].values, color="steelblue", alpha=0.7)
-ax.set_xticks(range(len(x)))
-ax.set_xticklabels([secs_to_label(s) for s in x], rotation=90, fontsize=7)
-ax.set_xlabel("Fenêtre temporelle"); ax.set_ylabel("Nombre de marchés")
-ax.set_title("Marchés avec données par fenêtre"); ax.grid(True, alpha=0.3, axis="y")
-
-plt.tight_layout()
-png_path = OUTPUT_DIR / "btc_5min_hedge_chart.png"
-plt.savefig(png_path, dpi=150, bbox_inches="tight")
-print(f"  PNG sauvegardé : {png_path}")
-plt.close()
+    plt.tight_layout()
+    png_path = OUTPUT_DIR / "btc_5min_hedge_chart.png"
+    plt.savefig(png_path, dpi=150, bbox_inches="tight")
+    print(f"  PNG : {png_path}")
+    plt.close()
 
 print("\nAnalyse terminée.\n")

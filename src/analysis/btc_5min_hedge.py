@@ -31,8 +31,9 @@ TRADES_URL  = "https://data-api.polymarket.com/trades"
 
 # Garde-fous API
 REQUEST_DELAY  = 0.3   # secondes entre chaque appel
-MAX_MARKETS    = 2000  # limite de sécurité
+MAX_MARKETS    = 5000  # limite de sécurité
 MAX_TRADES_PER_MARKET = 500
+GAMMA_MAX_OFFSET = 9900  # l'API retourne 422 au-delà de ~10000
 
 # Fenêtres temporelles (secondes avant résolution)
 WINDOWS_30S = list(range(300, 120 - 1, -30))
@@ -60,8 +61,9 @@ def get_json(url: str, params: dict, retries: int = 3) -> list | dict | None:
 
 def is_btc_5min(market: dict) -> bool:
     """Retourne True si le marché est un Bitcoin up/down de ~5 minutes."""
-    q    = (market.get("question")   or "").lower()
-    slug = (market.get("market_slug") or market.get("slug") or "").lower()
+    # Vrais noms de champs observés dans l'API Gamma
+    q    = (market.get("question") or "").lower()
+    slug = (market.get("slug")     or "").lower()
     text = q + " " + slug
 
     # Doit contenir bitcoin ou btc
@@ -78,18 +80,19 @@ def is_btc_5min(market: dict) -> bool:
     if not (has_btc and has_dir):
         return False
 
-    # Vérifier la durée (~5 minutes = 240-480s, tolérance élargie à 60-900s)
-    start = market.get("startDate") or market.get("start_date_iso")
-    end   = market.get("endDate")   or market.get("end_date_iso")
-    if not start or not end:
-        return False
+    # Durée : endDateIso - createdAt (startDate absent du schéma, createdAt = proxy)
+    end   = market.get("endDateIso") or market.get("endDate")
+    start = market.get("createdAt")
+    if not end or not start:
+        return True  # si on ne peut pas calculer la durée, garder quand même
+
     try:
         t_start = pd.Timestamp(start, tz="UTC")
         t_end   = pd.Timestamp(end,   tz="UTC")
         duration_sec = (t_end - t_start).total_seconds()
         return 60 <= duration_sec <= 900
     except Exception:
-        return False
+        return True  # en cas d'erreur de parse, garder
 
 
 # ── Étape 1 : Récupérer les marchés ──────────────────────────────────────────
@@ -98,56 +101,80 @@ print(f"{'='*70}")
 print("  ANALYSE HEDGE — BITCOIN UP/DOWN 5 MINUTES")
 print(f"{'='*70}")
 print("\n[1/4] Récupération des marchés Bitcoin up/down (Gamma API)...")
+print("  Stratégie : pagination par plages de dates pour contourner le plafond offset=10000\n")
 
 btc_markets = []
-offset = 0
-page_size = 100
-consecutive_empty = 0
+seen_ids    = set()
 
-while len(btc_markets) < MAX_MARKETS:
-    params = {
-        "closed":   "true",    # marchés résolus uniquement
-        "limit":    page_size,
-        "offset":   offset,
-        "tag_slug": "crypto",  # filtre large, on affine localement
-    }
-    data = get_json(GAMMA_URL, params)
-    if not data:
-        break
+# Pagination par plages de dates (contourne le plafond offset ~10000)
+# Couvre l'historique Polymarket de 2022 à aujourd'hui
+DATE_RANGES = [
+    ("2022-01-01", "2022-12-31"),
+    ("2023-01-01", "2023-12-31"),
+    ("2024-01-01", "2024-06-30"),
+    ("2024-07-01", "2024-12-31"),
+    ("2025-01-01", "2025-06-30"),
+    ("2025-07-01", "2025-12-31"),
+    ("2026-01-01", "2026-12-31"),
+]
 
-    # La réponse peut être une liste ou un dict avec une clé "markets"
-    page = data if isinstance(data, list) else data.get("markets", [])
-    if not page:
-        consecutive_empty += 1
-        if consecutive_empty >= 3:
+for date_start, date_end in DATE_RANGES:
+    offset = 0
+    page_size = 100
+    range_count = 0
+
+    while True:
+        if offset >= GAMMA_MAX_OFFSET:
+            print(f"  ⚠ Plafond offset atteint pour {date_start}–{date_end}, passage à la plage suivante")
             break
-        offset += page_size
-        continue
 
-    consecutive_empty = 0
-    for m in page:
-        if is_btc_5min(m):
-            btc_markets.append(m)
+        params = {
+            "closed":          "true",
+            "limit":           page_size,
+            "offset":          offset,
+            "end_date_min":    date_start,
+            "end_date_max":    date_end,
+        }
+        data = get_json(GAMMA_URL, params)
+        if not data:
+            break
 
-    offset += len(page)
-    print(f"  page offset={offset:>5}  →  {len(btc_markets)} marchés BTC 5min trouvés", end="\r")
+        page = data if isinstance(data, list) else data.get("markets", [])
+        if not page:
+            break
 
-    if len(page) < page_size:
-        break  # dernière page
-    time.sleep(REQUEST_DELAY)
+        new_this_page = 0
+        for m in page:
+            mid = m.get("id") or m.get("conditionId")
+            if mid in seen_ids:
+                continue
+            seen_ids.add(mid)
+            if is_btc_5min(m):
+                btc_markets.append(m)
+                new_this_page += 1
 
-print(f"\n  Total marchés Bitcoin up/down ~5min : {len(btc_markets)}")
+        offset += len(page)
+        range_count += len(page)
+        total_scanned = sum(1 for _ in seen_ids)
+        print(f"  {date_start[:4]} offset={offset:>5}  scannés={total_scanned:>6}  "
+              f"BTC 5min={len(btc_markets)}", end="\r")
+
+        if len(page) < page_size:
+            break
+        time.sleep(REQUEST_DELAY)
+
+print(f"\n\n  Total marchés Bitcoin up/down ~5min : {len(btc_markets)}")
+print(f"  Total marchés scannés             : {len(seen_ids)}")
 
 if len(btc_markets) == 0:
-    # Tentative sans filtre tag pour diagnostic
-    print("  ⚠ Aucun marché trouvé avec tag=crypto. Essai sans filtre tag...")
-    params = {"closed": "true", "limit": 10, "offset": 0}
-    sample = get_json(GAMMA_URL, params)
+    print("\n  ⚠ Aucun marché BTC 5min trouvé. Diagnostic :")
+    sample = get_json(GAMMA_URL, {"closed": "true", "limit": 5, "offset": 0})
     if sample:
         page = sample if isinstance(sample, list) else sample.get("markets", [])
         if page:
-            print(f"  Clés disponibles dans un marché : {list(page[0].keys())}")
-            print(f"  Exemple : {page[0].get('question', '')}")
+            print(f"  Clés dispo : {list(page[0].keys())}")
+            print(f"  Exemple question : {page[0].get('question', '')}")
+            print(f"  Exemple slug     : {page[0].get('slug', '')}")
     import sys; sys.exit(1)
 
 # Afficher les 5 premiers exemples
@@ -170,50 +197,51 @@ for m in btc_markets[:5]:
 print("\n[2/4] Extraction des métadonnées...")
 
 def extract_condition_id(m: dict) -> str | None:
+    # Vrais noms de champs de l'API Gamma
     for key in ["conditionId", "condition_id", "id"]:
         v = m.get(key)
         if v:
             return str(v)
-    # Chercher dans clobTokenIds
-    ids = m.get("clobTokenIds") or m.get("clob_token_ids")
+    ids = m.get("clobTokenIds")
     if ids:
         if isinstance(ids, str):
-            try:
-                ids = json.loads(ids)
-            except Exception:
-                pass
+            try: ids = json.loads(ids)
+            except Exception: pass
         if isinstance(ids, list) and ids:
             return str(ids[0])
     return None
 
 def extract_resolution(m: dict) -> float | None:
-    """Retourne 1.0 si YES a gagné, 0.0 si NO a gagné, None si inconnu."""
-    # Champ resolution direct
+    """
+    Retourne 1.0 si YES a gagné, 0.0 si NO a gagné, None si inconnu.
+
+    Sur l'API Gamma, la résolution d'un marché fermé se lit dans outcomePrices :
+      ["1", "0"]  →  YES a gagné  (index 0 = YES)
+      ["0", "1"]  →  NO  a gagné  (index 1 = NO)
+    """
+    # Méthode principale : outcomePrices (["1","0"] ou ["0","1"])
+    prices = m.get("outcomePrices")
+    if prices:
+        if isinstance(prices, str):
+            try: prices = json.loads(prices)
+            except Exception: prices = None
+        if isinstance(prices, list) and len(prices) >= 2:
+            try:
+                p0 = float(prices[0])
+                p1 = float(prices[1])
+                if p0 >= 0.99 and p1 <= 0.01:
+                    return 1.0  # YES a gagné
+                if p1 >= 0.99 and p0 <= 0.01:
+                    return 0.0  # NO a gagné
+            except (TypeError, ValueError):
+                pass
+
+    # Fallback : champ resolution texte
     res = m.get("resolution") or m.get("outcome")
     if res is not None:
         s = str(res).lower().strip()
-        if s in ("yes", "1", "1.0", "true"):
-            return 1.0
-        if s in ("no", "0", "0.0", "false"):
-            return 0.0
-        try:
-            v = float(s)
-            if v >= 0.99: return 1.0
-            if v <= 0.01: return 0.0
-        except ValueError:
-            pass
-
-    # Chercher dans les tokens/outcomes
-    outcomes = m.get("outcomes")
-    if isinstance(outcomes, str):
-        try: outcomes = json.loads(outcomes)
-        except Exception: outcomes = None
-    winner = m.get("winner") or m.get("winnerOutcome")
-    if winner and outcomes and isinstance(outcomes, list):
-        w = str(winner).lower()
-        for i, o in enumerate(outcomes):
-            if str(o).lower() == w:
-                return 1.0 if i == 0 else 0.0
+        if s in ("yes", "1", "1.0", "true"):  return 1.0
+        if s in ("no",  "0", "0.0", "false"): return 0.0
 
     return None
 
@@ -226,11 +254,12 @@ for m in btc_markets:
     if res is None:
         continue  # résolution inconnue → inutilisable
 
-    end_str   = m.get("endDate") or m.get("end_date_iso", "")
-    start_str = m.get("startDate") or m.get("start_date_iso", "")
+    # endDateIso est le vrai nom de champ (observé dans l'API)
+    end_str   = m.get("endDateIso") or m.get("endDate") or ""
+    start_str = m.get("createdAt")  or ""
     try:
-        end_dt  = pd.Timestamp(end_str,   tz="UTC")
-        start_dt = pd.Timestamp(start_str, tz="UTC")
+        end_dt   = pd.Timestamp(end_str,   tz="UTC")
+        start_dt = pd.Timestamp(start_str, tz="UTC") if start_str else end_dt - pd.Timedelta(minutes=5)
         duration = int((end_dt - start_dt).total_seconds())
     except Exception:
         continue

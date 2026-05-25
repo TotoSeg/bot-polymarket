@@ -101,6 +101,24 @@ def get_no_token_id(market: dict) -> Optional[str]:
     return str(clob_ids[1]) if len(clob_ids) >= 2 else None
 
 
+def get_yes_token_id(market: dict) -> Optional[str]:
+    """
+    Extrait le token_id YES (index 0 dans clobTokenIds).
+    Utilisé par la stratégie SY (achat YES sur marchés très probables).
+    """
+    clob_ids = market.get("clobTokenIds")
+    if not clob_ids:
+        return None
+    if isinstance(clob_ids, str):
+        try:
+            clob_ids = json.loads(clob_ids)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    if isinstance(clob_ids, list) and clob_ids:
+        return str(clob_ids[0])
+    return None
+
+
 # ── Vérification de liquidité (achat) ───────────────────────────────────────
 
 def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bool:
@@ -257,6 +275,43 @@ def place_no_order(client: ClobClient, token_id: str,
         return resp
     except Exception as e:
         logger.error(f"  Ordre échoué (token={token_id[:15]}...) : {e}")
+        return None
+
+
+# ── Placement d'ordre achat YES (CLOB V2) ────────────────────────────────────
+
+def place_yes_order(client: ClobClient, token_id: str,
+                    amount_usdc: float, yes_price: float) -> Optional[dict]:
+    """
+    Achète amount_usdc de tokens YES via CLOB V2 (ordre FAK).
+    Stratégie SY : YES 94-98%, résolution ≤ 96h, on parie que l'événement arrive.
+    """
+    yes_price   = min(round(yes_price, 4), 0.99)
+    amount_usdc = max(round(amount_usdc, 2), 1.0)
+
+    try:
+        resp = client.create_and_post_market_order(
+            order_args = MarketOrderArgs(
+                token_id   = token_id,
+                amount     = amount_usdc,
+                side       = Side.BUY,
+                order_type = OrderType.FAK,
+            ),
+            options    = PartialCreateOrderOptions(tick_size="0.01"),
+            order_type = OrderType.FAK,
+        )
+        filled_usdc = _extract_filled_usdc(resp, amount_usdc)
+        if filled_usdc < 1.0:
+            logger.warning(f"  Fill YES trop faible ({filled_usdc:.2f}$) pour {amount_usdc}$ demandés — ignoré")
+            return None
+        resp["_filled_usdc"] = filled_usdc
+        logger.success(
+            f"  Ordre YES placé : token={token_id[:15]}...  "
+            f"{filled_usdc:.2f}$ (demandé {amount_usdc:.2f}$) @ YES={yes_price:.3f} | resp={resp}"
+        )
+        return resp
+    except Exception as e:
+        logger.error(f"  Ordre YES échoué (token={token_id[:15]}...) : {e}")
         return None
 
 

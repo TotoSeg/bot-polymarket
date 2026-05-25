@@ -99,7 +99,7 @@ def save_portfolio(portfolio: dict, path: Path):
 
 def add_position(portfolio: dict, market: dict, strategy: str,
                   win_rate_prior: float, entry_price_yes: float, reason: str,
-                  bet_amount: float = None):
+                  bet_amount: float = None, direction: str = "NO"):
     """
     Enregistre une nouvelle position ouverte.
 
@@ -137,6 +137,7 @@ def add_position(portfolio: dict, market: dict, strategy: str,
         "market_id":        market_id,
         "question":         str(market.get("question", ""))[:80],
         "strategy":         strategy,
+        "direction":        direction,   # "NO" (S3/SP) ou "YES" (SY)
         "win_rate_prior":   win_rate_prior,
         "entry_price_yes":  round(entry_price_yes, 4),
         "bet_amount":       bet_amount,
@@ -160,20 +161,30 @@ def close_position(portfolio: dict, market_id: str, outcome: int,
     if pos is None:
         return
 
-    p_yes  = pos["entry_price_yes"]
-    p_no   = 1.0 - p_yes
-    bet    = pos["bet_amount"]
-    odds_b = p_yes / p_no if p_no > 0 else 0
+    p_yes     = pos["entry_price_yes"]
+    p_no      = 1.0 - p_yes
+    bet       = pos["bet_amount"]
+    odds_b    = p_yes / p_no if p_no > 0 else 0
+    direction = pos.get("direction", "NO")
 
     if override_profit is not None:
         # P&L réel fourni (clôture anticipée via vente CLOB ou cleanup)
         profit_net = round(override_profit, 2)
         win        = profit_net >= 0
-    elif outcome == 0:    # NO gagné ⇄ on gagne
+    elif direction == "YES":
+        # Stratégie SY : on a acheté des tokens YES
+        if outcome == 1:    # YES gagné → on gagne
+            gain_gross = bet * (p_no / p_yes) if p_yes > 0 else 0
+            profit_net = round(gain_gross * (1 - POLYMARKET_FEE), 2)
+            win = True
+        else:               # NO gagné → on perd la mise
+            profit_net = -bet
+            win = False
+    elif outcome == 0:      # Stratégie NO : NO gagné → on gagne
         profit_gross = bet * odds_b
         profit_net   = round(profit_gross * (1 - POLYMARKET_FEE), 2)
         win = True
-    else:               # YES gagné ⇄ on perd
+    else:                   # YES gagné → on perd
         profit_net = -bet
         win = False
 

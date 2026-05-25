@@ -44,8 +44,8 @@ from src.phase5_paper.paper_portfolio    import (
     load_portfolio, save_portfolio, add_position, close_position, print_summary,
 )
 from src.phase6_bot.order_executor import (
-    build_client, create_api_keys, get_no_token_id, check_liquidity,
-    place_no_order, get_usdc_balance,
+    build_client, create_api_keys, get_no_token_id, get_yes_token_id, check_liquidity,
+    place_no_order, place_yes_order, get_usdc_balance,
     check_sell_liquidity, sell_no_position, get_all_clob_positions,
     get_total_portfolio_value,
 )
@@ -67,6 +67,12 @@ MAX_DAYS_TO_RESOLUTION = 12
 
 # Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 1% = NO gagne à 99%
 EARLY_CLOSE_YES_THRESHOLD = 0.01
+
+# Stratégie SY : achat YES sur marchés très probables (94-98%) résolvant dans ≤ 96h
+SY_YES_MIN       = 0.94
+SY_YES_MAX       = 0.98
+SY_MAX_HOURS     = 96
+MIN_EV_SY        = 0.01   # EV minimum 1% pour SY (marges plus faibles qu'en S3/SP)
 
 
 # Priorité des catégories (0 = plus prioritaire)
@@ -116,6 +122,21 @@ def calc_expected_gain_pct(win_rate: float, yes_price: float) -> float:
     if no_price <= 0:
         return -1.0
     gain_if_win = (yes_price / no_price) * (1.0 - POLYMARKET_FEE)
+    return win_rate * gain_if_win - (1.0 - win_rate) * 1.0
+
+
+def calc_expected_gain_pct_yes(win_rate: float, yes_price: float) -> float:
+    """
+    Calcule le gain attendu en % de la mise pour un achat YES.
+
+    Formule :
+      gain si YES gagne = (1 - yes_price) / yes_price × (1 - frais)
+      perte si NO gagne = 100% de la mise
+      EV = win_rate × gain − (1 − win_rate) × 1.0
+    """
+    if yes_price <= 0 or yes_price >= 1:
+        return -1.0
+    gain_if_win = (1.0 - yes_price) / yes_price * (1.0 - POLYMARKET_FEE)
     return win_rate * gain_if_win - (1.0 - win_rate) * 1.0
 
 
@@ -312,16 +333,45 @@ def run_once(dry_run: bool = False):
     candidates = []
     skipped_14d = 0
     skipped_gain = 0
+    sy_cutoff = now_utc + timedelta(hours=SY_MAX_HOURS)
 
     for m in markets:
         yp = parse_yes_price(m)
-        if not yp or not (0.05 <= yp <= 0.35):
+        if not yp:
             continue
 
-        # Règle 3 : résolution dans la fenêtre [maintenant, +12j]
+        in_sp_range = 0.05 <= yp <= 0.35
+        in_sy_range = SY_YES_MIN <= yp <= SY_YES_MAX
+
+        if not in_sp_range and not in_sy_range:
+            continue
+
+        end_dt = parse_end_date(m)
+
+        # ── Stratégie SY : achat YES, fenêtre ≤ 96h ────────────────────────
+        if in_sy_range:
+            if end_dt < now_utc or end_dt > sy_cutoff:
+                skipped_14d += 1
+                continue
+            # Win rate estimé = prix marché + 1.5% (hypothèse d'edge court terme)
+            win_rate_sy = min(yp + 0.015, 0.995)
+            ev_sy = calc_expected_gain_pct_yes(win_rate_sy, yp)
+            if ev_sy < MIN_EV_SY:
+                skipped_gain += 1
+                continue
+            cat_prio = _category_priority(str(m.get("question", "")).lower())
+            sig_sy = {
+                "strategy":       "SY",
+                "win_rate_prior": win_rate_sy,
+                "score":          1.0,
+                "reason":         f"YES={yp:.3f} in 94-98%, résolution ≤96h",
+            }
+            candidates.append((cat_prio, -1, end_dt, -1.0, m, sig_sy, yp, ev_sy))
+            continue   # pas de signal S3/SP sur le même marché
+
+        # ── Stratégies S3/SP : achat NO, fenêtre ≤ 12j ──────────────────────
         # end_dt < now_utc = marché expiré non résolu (overdue) → skip
         # end_dt > window_cutoff = résolution trop lointaine → skip
-        end_dt = parse_end_date(m)
         if end_dt < now_utc or end_dt > window_cutoff:
             skipped_14d += 1
             continue
@@ -340,7 +390,7 @@ def run_once(dry_run: bool = False):
             strategy_prio = 0 if s["strategy"] == "S3" else 1  # S3 avant SP
             candidates.append((cat_prio, strategy_prio, end_dt, -s["score"], m, s, yp, ev))
 
-    # Tri : 1) S3 avant SP  2) résolution la plus proche  3) priorité catégorie  4) score décroissant
+    # Tri : 1) SY(-1) avant S3(0) avant SP(1)  2) résolution la plus proche  3) catégorie  4) score
     candidates.sort(key=lambda x: (x[1], x[2], x[0], x[3]))
 
     logger.info(f"Candidats : {len(candidates)} | Ignorés (>{MAX_DAYS_TO_RESOLUTION}j) : {skipped_14d} | "
@@ -366,39 +416,45 @@ def run_once(dry_run: bool = False):
             skipped += 1
             continue
 
-        no_token = get_no_token_id(m)
-        if no_token is None:
-            logger.debug(f"Pas de token_id NO pour {mid[:10]}... – skipped")
+        end_str   = end_dt.strftime("%Y-%m-%d %H:%M") if end_dt.year != 9999 else "???"
+        is_sy     = (strategy == "SY")
+        direction = "YES" if is_sy else "NO"
+
+        if is_sy:
+            token = get_yes_token_id(m)
+        else:
+            token = get_no_token_id(m)
+
+        if token is None:
+            logger.debug(f"Pas de token_id {direction} pour {mid[:10]}... – skipped")
             skipped += 1
             continue
-
-        end_str = end_dt.strftime("%Y-%m-%d") if end_dt.year != 9999 else "???"
 
         if dry_run:
             logger.info(f"  [DRY-RUN] {strategy:3s} | {end_str} | "
                         f"{str(m.get('question',''))[:45]:45s} | "
-                        f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={bet:.2f}$")
+                        f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={bet:.2f}$ | dir={direction}")
             add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
-                         bet_amount=bet)
+                         bet_amount=bet, direction=direction)
             if mid in portfolio["positions_ouvertes"] and end_dt.year != 9999:
                 portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
             nb_new += 1
         else:
-            if not check_liquidity(client, no_token, bet):
+            if not check_liquidity(client, token, bet):
                 skipped += 1
                 continue
-            resp = place_no_order(client, no_token, bet, yp)
+            resp = place_yes_order(client, token, bet, yp) if is_sy else place_no_order(client, token, bet, yp)
             if resp:
-                actual_bet = resp.get("_filled_usdc", bet)  # montant réellement exécuté (FAK partiel)
+                actual_bet = resp.get("_filled_usdc", bet)
                 m["_order_id"] = resp.get("orderID", "")
                 add_position(portfolio, m, strategy, sig["win_rate_prior"], yp, sig["reason"],
-                             bet_amount=actual_bet)
+                             bet_amount=actual_bet, direction=direction)
                 if mid in portfolio["positions_ouvertes"] and end_dt.year != 9999:
                     portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
                 nb_new += 1
                 logger.info(f"  [ENTREE] {strategy:3s} | {end_str} | "
                             f"{str(m.get('question',''))[:45]:45s} | "
-                            f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={actual_bet:.2f}$")
+                            f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={actual_bet:.2f}$ | dir={direction}")
             else:
                 skipped += 1
             time.sleep(0.3)

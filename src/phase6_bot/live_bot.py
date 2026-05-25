@@ -257,15 +257,17 @@ def run_once(dry_run: bool = False):
     # ── 3. Synchroniser le capital avec le vrai solde wallet ─────────────────
     # capital_disponible = solde USDC réel. C'est toujours la source de vérité.
     # capital_total      = USDC + valeur des positions (base du calcul Kelly).
-    if not dry_run and client:
-        real_balance = get_usdc_balance(client)
+    # En dry-run on fait aussi la synchro (lecture seule) pour avoir le vrai capital.
+    _sync_client = client if not dry_run else build_client()
+    try:
+        real_balance = get_usdc_balance(_sync_client)
         portfolio["capital_disponible"] = round(real_balance, 2)
         logger.info(f"Solde USDC wallet : {real_balance:.2f} USDC")
-        total = get_total_portfolio_value(client)
+        total = get_total_portfolio_value(_sync_client)
         if total > 0:
             portfolio["capital_total"] = total
-    elif dry_run:
-        # En dry-run : utiliser capital_total stocké si disponible, sinon disponible seul
+    except Exception as e:
+        logger.warning(f"Synchro capital impossible : {e}")
         if "capital_total" not in portfolio:
             portfolio["capital_total"] = portfolio["capital_disponible"]
 

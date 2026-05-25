@@ -366,7 +366,7 @@ def run_once(dry_run: bool = False):
                 "score":          1.0,
                 "reason":         f"YES={yp:.3f} in 94-98%, résolution ≤96h",
             }
-            candidates.append((cat_prio, -1, end_dt, -1.0, m, sig_sy, yp, ev_sy))
+            candidates.append((cat_prio, 1, end_dt, -1.0, m, sig_sy, yp, ev_sy))
             continue   # pas de signal S3/SP sur le même marché
 
         # ── Stratégies S3/SP : achat NO, fenêtre ≤ 12j ──────────────────────
@@ -387,11 +387,11 @@ def run_once(dry_run: bool = False):
                 skipped_gain += 1
                 continue
             cat_prio      = _category_priority(str(m.get("question", "")).lower())
-            strategy_prio = 0 if s["strategy"] == "S3" else 1  # S3 avant SP
+            strategy_prio = 0 if s["strategy"] == "S3" else 2  # S3=0, SP=2 (SY=1 entre les deux)
             candidates.append((cat_prio, strategy_prio, end_dt, -s["score"], m, s, yp, ev))
 
-    # Tri : 1) SY(-1) avant S3(0) avant SP(1)  2) résolution la plus proche  3) catégorie  4) score
-    candidates.sort(key=lambda x: (x[1], x[2], x[0], x[3]))
+    # Tri : 1) résolution la plus proche  2) S3(0) > SY(1) > SP(2)  3) catégorie  4) score
+    candidates.sort(key=lambda x: (x[2], x[1], x[0], x[3]))
 
     logger.info(f"Candidats : {len(candidates)} | Ignorés (>{MAX_DAYS_TO_RESOLUTION}j) : {skipped_14d} | "
                 f"Ignorés (EV<5%) : {skipped_gain}")

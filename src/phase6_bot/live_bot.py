@@ -340,8 +340,8 @@ def run_once(dry_run: bool = False):
             strategy_prio = 0 if s["strategy"] == "S3" else 1  # S3 avant SP
             candidates.append((cat_prio, strategy_prio, end_dt, -s["score"], m, s, yp, ev))
 
-    # Tri : 1) priorité catégorie  2) S3 avant SP  3) résolution la plus proche  4) score décroissant
-    candidates.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+    # Tri : 1) S3 avant SP  2) résolution la plus proche  3) priorité catégorie  4) score décroissant
+    candidates.sort(key=lambda x: (x[1], x[2], x[0], x[3]))
 
     logger.info(f"Candidats : {len(candidates)} | Ignorés (>{MAX_DAYS_TO_RESOLUTION}j) : {skipped_14d} | "
                 f"Ignorés (EV<5%) : {skipped_gain}")

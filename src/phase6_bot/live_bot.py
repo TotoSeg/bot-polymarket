@@ -48,6 +48,7 @@ from src.phase6_bot.order_executor import (
     build_client, create_api_keys, get_no_token_id, check_liquidity,
     place_no_order, get_usdc_balance,
     check_sell_liquidity, sell_no_position, get_all_clob_positions,
+    get_total_portfolio_value,
 )
 from src.phase6_bot.notion_reporter import update_notion_report
 
@@ -234,10 +235,18 @@ def run_once(dry_run: bool = False):
 
     # ── 3. Synchroniser le capital avec le vrai solde wallet ─────────────────
     # capital_disponible = solde USDC réel. C'est toujours la source de vérité.
+    # capital_total      = USDC + valeur des positions (base du calcul Kelly).
     if not dry_run and client:
         real_balance = get_usdc_balance(client)
         portfolio["capital_disponible"] = round(real_balance, 2)
         logger.info(f"Solde USDC wallet : {real_balance:.2f} USDC")
+        total = get_total_portfolio_value(client)
+        if total > 0:
+            portfolio["capital_total"] = total
+    elif dry_run:
+        # En dry-run : utiliser capital_total stocké si disponible, sinon disponible seul
+        if "capital_total" not in portfolio:
+            portfolio["capital_total"] = portfolio["capital_disponible"]
 
     # ── 4. Scanner les marchés S3 + SP ───────────────────────────────────────
     logger.info("Scan des marchés actifs (S3 + SP)...")
@@ -250,15 +259,15 @@ def run_once(dry_run: bool = False):
     now_utc        = datetime.now(tz=timezone.utc)
     window_cutoff  = now_utc + timedelta(days=MAX_DAYS_TO_RESOLUTION)
 
-    # Capital Kelly = liquidités + valeur face des positions (tokens × 1$)
-    # = ce que Polymarket affiche comme valeur totale du portefeuille
-    valeur_face   = sum(
-        p["bet_amount"] / max(1.0 - p.get("entry_price_yes", 0.5), 0.001)
-        for p in portfolio["positions_ouvertes"].values()
+    # Capital Kelly = valeur totale du portefeuille (USDC + positions).
+    # Priorité : capital_total (synchro depuis Polymarket) > variable d'env > capital_disponible.
+    capital_kelly = (
+        portfolio.get("capital_total")
+        or float(os.getenv("KELLY_CAPITAL_OVERRIDE", "0"))
+        or portfolio["capital_disponible"]
     )
-    capital_kelly = portfolio["capital_disponible"] + valeur_face
-    logger.info(f"Capital Kelly : {capital_kelly:.2f}$ "
-                f"(dispo {portfolio['capital_disponible']:.2f}$ + face {valeur_face:.2f}$)")
+    logger.info(f"Capital Kelly : {capital_kelly:.2f}$  "
+                f"(dispo {portfolio['capital_disponible']:.2f}$)")
 
     # Collecter les signaux S3 + SP, filtrer et trier
     candidates = []
@@ -555,6 +564,11 @@ def cmd_status():
         balance = get_usdc_balance(client)
         portfolio["capital_disponible"] = round(balance, 2)
         logger.info(f"Solde USDC wallet : {balance:.2f} USDC")
+        total = get_total_portfolio_value(client)
+        if total > 0:
+            portfolio["capital_total"] = total
+            logger.info(f"Capital Kelly (total) : {total:.2f}$")
+        save_portfolio(portfolio, PORTFOLIO_FILE)
     except Exception as e:
         logger.warning(f"Solde non disponible (clés API requises) : {e}")
     print_summary(portfolio)

@@ -346,3 +346,73 @@ def get_usdc_balance(client: ClobClient) -> float:
     except Exception as e:
         logger.warning(f"Solde non récupéré : {e}")
         return 0.0
+
+
+# ── Valeur totale du portefeuille ────────────────────────────────────────────
+
+def get_total_portfolio_value(client: ClobClient) -> float:
+    """
+    Retourne valeur totale = USDC liquide + valeur des positions ouvertes.
+
+    Valeur d'une position = nb tokens × prix courant (last trade price CLOB).
+    Retourne le seul USDC en cas d'échec sur les positions.
+    """
+    funder = os.environ.get("POLYMARKET_PROXY_WALLET", "").strip()
+    if not funder:
+        return 0.0
+
+    usdc = get_usdc_balance(client)
+
+    try:
+        resp = requests.get(
+            "https://data-api.polymarket.com/positions",
+            params={"user": funder, "sizeThreshold": "0.001"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"Positions non récupérées pour calcul total : {e}")
+        return usdc
+
+    positions = data if isinstance(data, list) else data.get("positions", [])
+    if not positions:
+        return usdc
+
+    # Détecter les bons noms de champs depuis la première position
+    sample = positions[0]
+    token_field = next((k for k in ("asset_id", "tokenId", "token_id", "assetId",
+                                     "conditionTokenId", "outcomeTokenId")
+                        if sample.get(k)), None)
+    size_field  = next((k for k in ("size", "balance", "quantity", "amount", "shares")
+                        if sample.get(k) not in (None, 0, "0", "0.0", 0.0)), None)
+
+    if not token_field or not size_field:
+        logger.debug(f"Champs positions inconnus — clés dispo : {list(sample.keys())}")
+        return usdc
+
+    positions_value = 0.0
+    for pos in positions:
+        token_id = pos.get(token_field)
+        size_raw = pos.get(size_field)
+        if not token_id or size_raw in (None, 0, "0"):
+            continue
+        try:
+            size = float(size_raw)
+        except (TypeError, ValueError):
+            continue
+
+        try:
+            pr    = requests.get("https://clob.polymarket.com/last-trade-price",
+                                 params={"token_id": token_id}, timeout=10)
+            price = float(pr.json().get("price", 0)) if pr.status_code == 200 else 0.0
+        except Exception:
+            price = 0.0
+
+        # Prix inconnu → valeur face (1$) comme borne haute prudente
+        positions_value += size * (price if price > 0 else 1.0)
+
+    total = round(usdc + positions_value, 2)
+    logger.info(f"Valeur totale portefeuille : {total:.2f}$ "
+                f"(USDC {usdc:.2f}$ + positions {positions_value:.2f}$)")
+    return total

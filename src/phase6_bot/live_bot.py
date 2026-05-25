@@ -320,8 +320,8 @@ def run_once(dry_run: bool = False):
                for p in portfolio["positions_ouvertes"].values()):
             continue
 
-        # Mise = min(5% × capital total, 200$)
-        bet = min(capital_kelly * 0.05, max_bet)
+        # Mise = min(5% × capital total, 200$, USDC disponible)
+        bet = min(capital_kelly * 0.05, max_bet, portfolio["capital_disponible"])
         if bet < 1.0:
             skipped += 1
             continue

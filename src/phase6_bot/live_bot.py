@@ -163,7 +163,7 @@ def parse_end_date(m: dict) -> datetime:
     question = m.get("question", "") or m.get("slug", "") or ""
     months = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
               "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
-    match = re.search(r"by\s+(\w+)\s+(\d{1,2})", question, re.IGNORECASE)
+    match = re.search(r"(?:by|through)\s+(\w+)\s+(\d{1,2})", question, re.IGNORECASE)
     if match:
         month_str = match.group(1).lower()
         day       = int(match.group(2))

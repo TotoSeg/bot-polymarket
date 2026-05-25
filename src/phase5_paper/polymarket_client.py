@@ -50,7 +50,7 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
         try:
             resp = requests.get(
                 f"{GAMMA_API}/markets",
-                params={"closed": "false", "active": "true", "limit": PAGE_SIZE, "offset": offset},
+                params={"closed": "false", "limit": PAGE_SIZE, "offset": offset},
                 timeout=15,
             )
             resp.raise_for_status()

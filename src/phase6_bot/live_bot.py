@@ -120,20 +120,42 @@ def calc_expected_gain_pct(win_rate: float, yes_price: float) -> float:
 
 
 def parse_end_date(m: dict) -> datetime:
-    """Extrait la date de résolution d'un marché, ou datetime 9999 si inconnue."""
+    """
+    Extrait la date de résolution d'un marché.
+    Si absente du champ endDate, tente de l'inférer depuis le titre
+    (ex: "by May 26?" → 2026-05-26).
+    Retourne datetime 9999 si vraiment inconnue.
+    """
+    import re
     FAR_FUTURE = datetime(9999, 12, 31, tzinfo=timezone.utc)
+
     raw = m.get("endDate") or m.get("endDateIso") or ""
-    if not raw:
-        return FAR_FUTURE
-    try:
-        raw = raw.rstrip("Z").replace("Z", "+00:00")
-        if "T" in raw:
-            dt = datetime.fromisoformat(raw)
-        else:
-            dt = datetime.fromisoformat(raw + "T00:00:00")
-        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
-    except (ValueError, TypeError):
-        return FAR_FUTURE
+    if raw:
+        try:
+            raw = raw.rstrip("Z").replace("Z", "+00:00")
+            dt  = datetime.fromisoformat(raw if "T" in raw else raw + "T23:59:59")
+            return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+        except (ValueError, TypeError):
+            pass
+
+    # Inférer depuis le titre : "by May 26", "by June 30", etc.
+    question = m.get("question", "") or m.get("slug", "") or ""
+    months = {"january":1,"february":2,"march":3,"april":4,"may":5,"june":6,
+              "july":7,"august":8,"september":9,"october":10,"november":11,"december":12}
+    match = re.search(r"by\s+(\w+)\s+(\d{1,2})", question, re.IGNORECASE)
+    if match:
+        month_str = match.group(1).lower()
+        day       = int(match.group(2))
+        month     = months.get(month_str)
+        if month:
+            now  = datetime.now(tz=timezone.utc)
+            year = now.year if (month >= now.month or (month == now.month and day >= now.day)) else now.year + 1
+            try:
+                return datetime(year, month, day, 23, 59, 59, tzinfo=timezone.utc)
+            except ValueError:
+                pass
+
+    return FAR_FUTURE
 
 
 # ─── Setup logs ─────────────────────────────────────────────────────────────

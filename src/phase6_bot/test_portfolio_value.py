@@ -4,8 +4,10 @@ Comparer la valeur retournée avec ce qu'affiche Polymarket.
 
 Usage : python3 src/phase6_bot/test_portfolio_value.py
 """
-import os, json, requests
+import os, sys, json, requests
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 # Charger .env
 _env = Path(__file__).parent / ".env"
@@ -16,9 +18,6 @@ for line in _env.read_text().splitlines():
         os.environ.setdefault(k.strip(), v.strip())
 
 from src.phase6_bot.order_executor import build_client, get_usdc_balance, get_total_portfolio_value
-
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 client = build_client()
 

@@ -6,6 +6,8 @@ Accès aux données en temps réel via l'API Gamma (métadonnées + prix).
 Endpoints utilisés :
   GET https://gamma-api.polymarket.com/markets
     ➔ Liste des marchés actifs avec prix YES/NO courants
+  GET https://gamma-api.polymarket.com/events
+    ➔ Liste des événements (contient les marchés neg-risk groupés)
   GET https://gamma-api.polymarket.com/markets/{id}
     ➔ Détail d'un marché (résolution, prix finaux)
   GET https://gamma-api.polymarket.com/markets?clobTokenIds={token_id}
@@ -76,6 +78,55 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
         time.sleep(REQUEST_DELAY)
 
     logger.info(f"Marchés actifs récupérés (vol >= {min_volume}$) : {len(all_markets)}")
+    return all_markets
+
+
+def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> list[dict]:
+    """
+    Récupère les marchés contenus dans les événements Gamma (endpoint /events).
+
+    Les marchés neg-risk groupés (ex: "by May 26?", "by May 27?") n'apparaissent
+    pas dans /markets mais sont accessibles via /events → chaque event contient
+    un tableau 'markets' avec les sous-marchés individuels.
+
+    Retourne une liste plate de marchés, dans le même format que get_active_markets().
+    """
+    all_markets = []
+    offset = 0
+
+    for page in range(max_pages):
+        try:
+            resp = requests.get(
+                f"{GAMMA_API}/events",
+                params={"closed": "false", "limit": PAGE_SIZE, "offset": offset},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            events = resp.json()
+        except requests.RequestException as e:
+            logger.warning(f"Erreur /events page {page} : {e}")
+            break
+
+        if not events:
+            break
+
+        for event in events:
+            sub_markets = event.get("markets") or []
+            for m in sub_markets:
+                if m.get("closed"):
+                    continue
+                vol = float(m.get("volume", 0) or 0)
+                if vol < min_volume:
+                    continue
+                all_markets.append(m)
+
+        if len(events) < PAGE_SIZE:
+            break
+
+        offset += PAGE_SIZE
+        time.sleep(REQUEST_DELAY)
+
+    logger.info(f"Marchés via /events récupérés (vol >= {min_volume}$) : {len(all_markets)}")
     return all_markets
 
 

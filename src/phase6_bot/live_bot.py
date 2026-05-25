@@ -38,7 +38,7 @@ if _env_file.exists():
 from loguru import logger
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.phase5_paper.polymarket_client import get_active_markets, parse_yes_price, parse_resolution, get_market, get_market_by_token_id
+from src.phase5_paper.polymarket_client import get_active_markets, get_active_event_markets, parse_yes_price, parse_resolution, get_market, get_market_by_token_id
 from src.phase5_paper.strategy_signals   import check_signals
 from src.phase5_paper.paper_portfolio    import (
     load_portfolio, save_portfolio, add_position, close_position, print_summary,
@@ -271,8 +271,24 @@ def run_once(dry_run: bool = False):
 
     # ── 4. Scanner les marchés S3 + SP ───────────────────────────────────────
     logger.info("Scan des marchés actifs (S3 + SP)...")
-    markets = get_active_markets(min_volume=int(os.getenv("MIN_VOLUME_USD", "500")),
-                                  max_pages=30)
+    min_vol = int(os.getenv("MIN_VOLUME_USD", "500"))
+
+    # Source 1 : endpoint /markets (marchés standalone)
+    markets = get_active_markets(min_volume=min_vol, max_pages=30)
+
+    # Source 2 : endpoint /events (marchés neg-risk groupés, ex: Iran ceasefire)
+    # Fusionnés par ID pour éviter les doublons
+    event_markets = get_active_event_markets(min_volume=min_vol, max_pages=20)
+    existing_ids  = {str(m.get("id", "")) for m in markets}
+    added = 0
+    for m in event_markets:
+        mid = str(m.get("id", ""))
+        if mid and mid not in existing_ids:
+            markets.append(m)
+            existing_ids.add(mid)
+            added += 1
+    if added:
+        logger.info(f"+ {added} marchés supplémentaires via /events (neg-risk)")
 
     max_bet        = float(os.getenv("MAX_BET_USDC", "200"))
     nb_new         = 0

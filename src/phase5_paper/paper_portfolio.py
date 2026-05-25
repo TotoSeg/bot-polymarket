@@ -224,6 +224,7 @@ def print_summary(portfolio: dict):
     logger.info(f"  Trades clos          : {nb_total:>10,}")
     logger.info(f"  Win rate             : {wr:>9.1f}%")
 
+    ouvert = portfolio.get("positions_ouvertes", {})
     if ouvert:
         logger.info(f"\n  Positions ouvertes ({len(ouvert)}) :")
         for mid, pos in list(ouvert.items())[:10]:

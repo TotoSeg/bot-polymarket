@@ -42,7 +42,6 @@ from src.phase5_paper.polymarket_client import get_active_markets, parse_yes_pri
 from src.phase5_paper.strategy_signals   import check_signals
 from src.phase5_paper.paper_portfolio    import (
     load_portfolio, save_portfolio, add_position, close_position, print_summary,
-    _kelly_size,
 )
 from src.phase6_bot.order_executor import (
     build_client, create_api_keys, get_no_token_id, check_liquidity,
@@ -253,7 +252,7 @@ def run_once(dry_run: bool = False):
     markets = get_active_markets(min_volume=int(os.getenv("MIN_VOLUME_USD", "500")),
                                   max_pages=30)
 
-    max_bet        = float(os.getenv("MAX_BET_USDC", "25"))
+    max_bet        = float(os.getenv("MAX_BET_USDC", "200"))
     nb_new         = 0
     skipped        = 0
     now_utc        = datetime.now(tz=timezone.utc)
@@ -321,11 +320,9 @@ def run_once(dry_run: bool = False):
                for p in portfolio["positions_ouvertes"].values()):
             continue
 
-        # Mise = min(Kelly, max_bet, capital_disponible)
-        # On utilise tout le capital dispo si Kelly > dispo (pas de skip pour capital insuffisant).
-        # Skip uniquement si le résultat < 1$ (minimum CLOB).
+        # Mise = min(5% × capital total, 200$, capital disponible)
         bet = min(
-            _kelly_size(sig["win_rate_prior"], yp, capital_kelly),
+            capital_kelly * 0.05,
             max_bet,
             portfolio["capital_disponible"],
         )

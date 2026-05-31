@@ -111,14 +111,16 @@ def _s3_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dic
 
 def _sp_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dict]:
     """
-    SP : marchés politiques/géopolitiques, YES 25-35% (NO ≤ 75%).
-    Limité à YES ≥ 25% pour réduire le risque sur les marchés élection à fort NO.
-    Backtest 2024-25 : WR 92.2%, ROI +1522%.
+    SP : marchés politiques/géopolitiques, YES 10-25% (NO 75-90%).
+    Backtest 2024-25 : WR 92.2-99.2%.
     """
-    if not (0.25 <= yes_price <= 0.35):
+    if not (0.10 <= yes_price <= 0.25):
         return None
 
-    prior = 0.922; score = 6.0; tier = "25-35%->92.2%"
+    if yes_price < 0.20:
+        prior = 0.992; score = 7.0; tier = "10-20%->99.2%"
+    else:
+        prior = 0.922; score = 6.0; tier = "20-25%->92.2%"
 
     # Bonus catégorie
     cat = _category(question_lc)

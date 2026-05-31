@@ -89,11 +89,50 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
     pas dans /markets mais sont accessibles via /events → chaque event contient
     un tableau 'markets' avec les sous-marchés individuels.
 
+    Les événements "restricted" (ex: Iran ceasefire) n'apparaissent pas dans la
+    pagination standard → on les fetch directement par slug via PRIORITY_SLUGS.
+
     Retourne une liste plate de marchés, dans le même format que get_active_markets().
     """
-    all_markets = []
-    offset = 0
+    # Événements à toujours inclure car absents de la pagination standard (restricted=true)
+    PRIORITY_SLUGS = [
+        "iran-ceasefire-continues-through",
+    ]
 
+    all_markets = []
+    seen_ids    = set()
+
+    def _add_sub_markets(event):
+        for m in (event.get("markets") or []):
+            if m.get("closed"):
+                continue
+            vol = float(m.get("volume", 0) or 0)
+            if vol < min_volume:
+                continue
+            mid = str(m.get("id", ""))
+            if mid and mid not in seen_ids:
+                all_markets.append(m)
+                seen_ids.add(mid)
+
+    # ── Fetch prioritaire par slug ────────────────────────────────────────────
+    for slug in PRIORITY_SLUGS:
+        try:
+            resp = requests.get(
+                f"{GAMMA_API}/events",
+                params={"slug": slug},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list):
+                for event in data:
+                    _add_sub_markets(event)
+            time.sleep(REQUEST_DELAY)
+        except requests.RequestException as e:
+            logger.warning(f"Erreur fetch slug {slug} : {e}")
+
+    # ── Pagination standard ───────────────────────────────────────────────────
+    offset = 0
     for page in range(max_pages):
         try:
             resp = requests.get(
@@ -111,14 +150,7 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
             break
 
         for event in events:
-            sub_markets = event.get("markets") or []
-            for m in sub_markets:
-                if m.get("closed"):
-                    continue
-                vol = float(m.get("volume", 0) or 0)
-                if vol < min_volume:
-                    continue
-                all_markets.append(m)
+            _add_sub_markets(event)
 
         if len(events) < PAGE_SIZE:
             break

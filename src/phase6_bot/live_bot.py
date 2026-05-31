@@ -39,7 +39,7 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.phase5_paper.polymarket_client import get_active_markets, get_active_event_markets, parse_yes_price, parse_resolution, get_market, get_market_by_token_id
-from src.phase5_paper.strategy_signals   import check_signals
+from src.phase5_paper.strategy_signals   import check_signals, _is_crypto
 from src.phase5_paper.paper_portfolio    import (
     load_portfolio, save_portfolio, add_position, close_position, print_summary,
 )
@@ -69,6 +69,19 @@ MAX_DAYS_TO_RESOLUTION = 12
 EARLY_CLOSE_YES_THRESHOLD = 0.01
 
 # Stratégie SY : achat YES sur marchés très probables (94-98%) résolvant dans ≤ 96h
+_KW_SPORT = [
+    "football", "soccer", "basketball", "tennis", "nba", "nfl", "nhl", "mlb",
+    "premier league", "ligue 1", "serie a", "bundesliga", "la liga",
+    "champions league", "world cup", "copa ", "super bowl",
+    "goal scorer", "top scorer", "top goal", "golden boot",
+    "grand slam", "wimbledon", "formula 1", " f1 ",
+    "ufc ", " boxing", "olympics", "rugby ", "cricket", " golf ",
+    " fc ", "batting", "pitcher", "quarterback",
+]
+
+def _is_sport(q: str) -> bool:
+    return any(k in q.lower() for k in _KW_SPORT)
+
 SY_YES_MIN       = 0.94
 SY_YES_MAX       = 0.98
 SY_MAX_HOURS     = 96
@@ -352,6 +365,9 @@ def run_once(dry_run: bool = False):
         if in_sy_range:
             if end_dt < now_utc or end_dt > sy_cutoff:
                 skipped_14d += 1
+                continue
+            q = str(m.get("question", "")).lower()
+            if _is_crypto(q) or _is_sport(q):
                 continue
             # Win rate estimé = prix marché + 1.5% (hypothèse d'edge court terme)
             win_rate_sy = min(yp + 0.015, 0.995)

@@ -82,9 +82,9 @@ _KW_SPORT = [
 def _is_sport(q: str) -> bool:
     return any(k in q.lower() for k in _KW_SPORT)
 
-SY_YES_MIN       = 0.94
+SY_YES_MIN       = 0.92
 SY_YES_MAX       = 0.98
-SY_MAX_HOURS     = 96
+SY_MAX_HOURS     = 48
 MIN_EV_SY        = 0.01   # EV minimum 1% pour SY (marges plus faibles qu'en S3/SP)
 
 

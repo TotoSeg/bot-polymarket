@@ -62,8 +62,10 @@ POLYMARKET_FEE = 0.02
 # Seuil de gain attendu minimum pour entrer en position (règle 1)
 MIN_EXPECTED_GAIN_PCT = 0.05   # 5%
 
-# Fenêtre maximale de résolution (règle 3)
-MAX_DAYS_TO_RESOLUTION = 12
+# Fenêtre maximale de résolution par stratégie
+MAX_DAYS_S3 = 5   # S3 : résolution ≤ 5 jours
+MAX_DAYS_SP = 7   # SP : résolution ≤ 7 jours
+MAX_DAYS_TO_RESOLUTION = max(MAX_DAYS_S3, MAX_DAYS_SP)  # filtre global = 7j
 
 # Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 1% = NO gagne à 99%
 EARLY_CLOSE_YES_THRESHOLD = 0.01
@@ -397,6 +399,11 @@ def run_once(dry_run: bool = False):
         s3 = [s for s in sigs if s["strategy"] == "S3"]
         best_sigs = s3 if s3 else [s for s in sigs if s["strategy"] == "SP"]
         for s in best_sigs:
+            # Fenêtre max par stratégie
+            max_days = MAX_DAYS_S3 if s["strategy"] == "S3" else MAX_DAYS_SP
+            if end_dt > now_utc + timedelta(days=max_days):
+                skipped_14d += 1
+                continue
             # Règle 1 : gain attendu ≥ 5%
             ev = calc_expected_gain_pct(s["win_rate_prior"], yp)
             if ev < MIN_EXPECTED_GAIN_PCT:

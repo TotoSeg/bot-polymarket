@@ -71,6 +71,32 @@ MAX_DAYS_TO_RESOLUTION = max(MAX_DAYS_S3, MAX_DAYS_SP)  # filtre global = 7j
 EARLY_CLOSE_YES_THRESHOLD = 0.01
 
 # Stratégie SY : achat YES sur marchés très probables (94-98%) résolvant dans ≤ 96h
+# Marchés à exclure : peuvent résoudre "other" ou présenter un risque de non-événement
+_KW_OTHER_RISK = [
+    # Primaires / nominations : la primaire peut être annulée, un candidat peut se retirer
+    "primary", "primaries", "nomination", "nominate", "nominee",
+    "qualify", "qualifier", "caucus",
+    # Marchés multi-issue où un tiers peut gagner
+    "plurality", "majority winner", "most votes",
+    # Événements conditionnels incertains
+    "if ", "assuming", "provided that",
+]
+
+def _has_other_outcome(market: dict) -> bool:
+    """Retourne True si le marché peut résoudre à 'other' (non-binaire)."""
+    outcomes_raw = market.get("outcomes") or "[]"
+    try:
+        import json
+        outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+        return any("other" in str(o).lower() for o in outcomes)
+    except Exception:
+        return False
+
+def _is_other_risk(question: str) -> bool:
+    """Retourne True si la question suggère un risque de résolution 'other'."""
+    q = question.lower()
+    return any(k in q for k in _KW_OTHER_RISK)
+
 _KW_SPORT = [
     "football", "soccer", "basketball", "tennis", "nba", "nfl", "nhl", "mlb",
     "premier league", "ligue 1", "serie a", "bundesliga", "la liga",
@@ -353,6 +379,11 @@ def run_once(dry_run: bool = False):
     for m in markets:
         yp = parse_yes_price(m)
         if not yp:
+            continue
+
+        # Exclure les marchés pouvant résoudre "other" ou à risque de non-événement
+        q_raw = str(m.get("question", ""))
+        if _has_other_outcome(m) or _is_other_risk(q_raw):
             continue
 
         in_sp_range = 0.05 <= yp <= 0.35

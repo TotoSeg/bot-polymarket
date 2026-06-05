@@ -20,15 +20,23 @@ Déclenchement anticipé :
   À T+0 (clôture bougie = ouverture marché suivant) → ordre envoyé immédiatement.
 
 Usage :
-  python src/phase6_bot/bot_5m.py --paper      ← simulation sans ordres réels (défaut)
-  python src/phase6_bot/bot_5m.py --status     ← affiche le portfolio et P&L
-  python src/phase6_bot/bot_5m.py --live       ← ORDRES RÉELS (à activer consciemment)
+  python src/phase6_bot/bot_5m.py --paper                ← simulation sans ordres réels (défaut)
+  python src/phase6_bot/bot_5m.py --status               ← affiche le portfolio et P&L
+  python src/phase6_bot/bot_5m.py --live                 ← ORDRES RÉELS wallet par défaut (.env)
+  python src/phase6_bot/bot_5m.py --live --env .env.5m   ← ORDRES RÉELS wallet dédié (.env.5m)
+  python src/phase6_bot/bot_5m.py --create-keys          ← génère les credentials API du wallet
+
+Multi-wallet :
+  Chaque wallet a son propre fichier .env avec ses credentials.
+  live_bot.py  → lit .env        (wallet principal, stratégies S3/SP/SY)
+  bot_5m.py    → lit .env.5m     (wallet dédié mean-reversion 5m)
+  Les deux bots tournent en parallèle, capital totalement séparé.
 
 Ce bot est INDÉPENDANT de live_bot.py :
   - Portfolio séparé : outputs/phase6/portfolio_5m.json
   - P&L séparé      : logs/pnl_5m.csv
   - Capital séparé  : CAPITAL_5M (configurable ci-dessous)
-  - Même wallet Polymarket mais capital alloué distinct
+  - Wallet dédié si --env .env.5m est passé
 """
 
 import sys, os, json, time, asyncio, argparse, csv
@@ -819,15 +827,60 @@ async def run_bot(paper: bool = True):
 # POINT D'ENTRÉE
 # ──────────────────────────────────────────────────────────────────────────────
 
+def load_env_file(env_path: str):
+    """
+    Charge un fichier .env spécifique dans os.environ.
+    Permet d'utiliser un wallet dédié différent de celui de live_bot.py.
+    Format attendu : CLE=VALEUR (une par ligne, # = commentaire).
+    """
+    p = Path(env_path)
+    if not p.exists():
+        print(f"Fichier .env introuvable : {env_path}")
+        return False
+    for line in p.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ[k.strip()] = v.strip()
+    print(f"Credentials chargés depuis {env_path}")
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Bot mean-reversion 5m Polymarket")
-    parser.add_argument("--paper",  action="store_true", default=True,
+    parser.add_argument("--paper",       action="store_true", default=True,
                         help="Mode simulation (défaut, aucun ordre réel)")
-    parser.add_argument("--live",   action="store_true",
+    parser.add_argument("--live",        action="store_true",
                         help="Mode réel — PLACE DES ORDRES VRAIS")
-    parser.add_argument("--status", action="store_true",
+    parser.add_argument("--status",      action="store_true",
                         help="Affiche le portfolio et quitte")
+    parser.add_argument("--env",         default=None, metavar="FICHIER",
+                        help="Fichier .env à charger (ex: .env.5m pour wallet dédié)")
+    parser.add_argument("--create-keys", action="store_true",
+                        help="Génère les credentials API depuis POLYMARKET_PRIVATE_KEY")
     args = parser.parse_args()
+
+    # Charger le fichier .env demandé (wallet dédié)
+    # Si absent, live_bot.py et bot_5m.py partagent le même wallet (via .env par défaut)
+    env_file = args.env or str(Path(__file__).parent / ".env")
+    if Path(env_file).exists():
+        load_env_file(env_file)
+
+    if args.create_keys:
+        pk = os.environ.get("POLYMARKET_PRIVATE_KEY", "")
+        if not pk:
+            print("Définir POLYMARKET_PRIVATE_KEY dans le fichier .env avant de générer les clés.")
+            return
+        try:
+            sys.path.insert(0, str(PROJECT_ROOT))
+            from src.phase6_bot.order_executor import create_api_keys
+            keys = create_api_keys(pk)
+            print("\nCredentials générés — à copier dans votre .env :")
+            for k, v in keys.items():
+                print(f"  POLYMARKET_{k.upper()} = {v}")
+        except Exception as e:
+            print(f"Erreur : {e}")
+        return
 
     if args.status:
         portfolio = load_portfolio()
@@ -836,6 +889,8 @@ def main():
 
     if args.live:
         print("\n⚠️  MODE RÉEL DEMANDÉ — des ordres réels seront placés.")
+        wallet = os.environ.get("POLYMARKET_PROXY_WALLET", "inconnu")
+        print(f"   Wallet : {wallet}")
         print("   Tapez 'CONFIRMER' pour continuer ou Entrée pour annuler : ", end="")
         if input().strip() != "CONFIRMER":
             print("Annulé.")

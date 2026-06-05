@@ -132,9 +132,17 @@ def add_position(portfolio: dict, market: dict, strategy: str,
         logger.debug(f"Capital insuffisant pour {market_id[:10]}... ({bet_amount}$ > dispo)")
         return False
 
+    # Extraire le conditionId (identifiant de l'événement parent dans Polymarket).
+    # Pour les marchés neg-risk (primaires, élections multi-candidats), plusieurs
+    # marchés partagent le même conditionId. On le stocke pour bloquer les doublons.
+    condition_id = str(
+        market.get("conditionId") or market.get("condition_id") or ""
+    ).strip()
+
     portfolio["capital_disponible"] -= bet_amount
     portfolio["positions_ouvertes"][market_id] = {
         "market_id":        market_id,
+        "condition_id":     condition_id,   # identifiant de l'événement parent
         "question":         str(market.get("question", ""))[:80],
         "strategy":         strategy,
         "direction":        direction,   # "NO" (S3/SP) ou "YES" (SY)

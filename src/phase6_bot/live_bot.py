@@ -46,8 +46,8 @@ from src.phase5_paper.paper_portfolio    import (
 from src.phase6_bot.order_executor import (
     build_client, create_api_keys, get_no_token_id, get_yes_token_id, check_liquidity,
     place_no_order, place_yes_order, get_usdc_balance,
-    check_sell_liquidity, sell_no_position, get_all_clob_positions,
-    get_total_portfolio_value,
+    check_sell_liquidity, sell_no_position, sell_yes_position,
+    get_all_clob_positions, get_total_portfolio_value,
 )
 from src.phase6_bot.notion_reporter import update_notion_report
 
@@ -259,12 +259,17 @@ def run_once(dry_run: bool = False):
     if not dry_run and client:
         for mid in list(portfolio["positions_ouvertes"].keys()):
             pos    = portfolio["positions_ouvertes"][mid]
+
+            # Seulement les positions NO (SP/S3) — pas les positions SY (achat YES)
+            if pos.get("direction", "NO") != "NO":
+                continue
+
             market = get_market(mid)
             if market is None:
                 continue
             current_yp = parse_yes_price(market)
             if current_yp is None or current_yp > EARLY_CLOSE_YES_THRESHOLD:
-                continue  # pas encore à 99.9%
+                continue  # pas encore à 1%
 
             # Calculer le nombre de tokens NO détenus
             entry_no_price = 1.0 - pos["entry_price_yes"]
@@ -279,23 +284,79 @@ def run_once(dry_run: bool = False):
             if not no_token:
                 continue
 
-            # Vérifier la liquidité côté vente
-            if not check_sell_liquidity(client, no_token, tokens_held, breakeven_price):
+            # Vérifier la liquidité côté vente.
+            # Quand YES ≤ 0.01¢, le marché est quasi résolu : on force la vente
+            # même si le carnet est mince (min_price=0 = accepter n'importe quel prix).
+            # Si YES est entre 0.01¢ et 1¢, on reste strict sur le breakeven.
+            force_sell   = current_yp <= 0.001   # YES < 0.1¢ → forcer
+            check_price  = 0.0 if force_sell else breakeven_price
+
+            if not force_sell and not check_sell_liquidity(
+                client, no_token, tokens_held, check_price
+            ):
                 logger.info(f"  [HOLD] {mid[:10]}... – YES={current_yp:.4f} mais liquidité "
                             f"insuffisante pour sortir sans P&L négatif, on attend la résolution")
                 continue
 
             # Vendre les tokens NO
-            resp = sell_no_position(client, no_token, tokens_held, breakeven_price)
+            resp = sell_no_position(client, no_token, tokens_held, check_price)
             if resp:
-                # Calculer le gain réalisé estimé
                 sale_price = float(resp.get("price", 1.0 - current_yp))
                 proceeds   = tokens_held * sale_price * (1.0 - POLYMARKET_FEE)
                 profit     = round(proceeds - pos["bet_amount"], 2)
-                # Fermer la position dans le portfolio (outcome NO gagne = 0)
                 close_position(portfolio, mid, outcome=0, override_profit=profit)
                 nb_early += 1
-                logger.success(f"  [CLOTURE ANTICIPEE] {pos.get('question','')[:50]} | "
+                logger.success(f"  [CLOTURE ANTICIPEE NO] {pos.get('question','')[:50]} | "
+                               f"YES={current_yp:.4f} | profit={profit:+.2f}$")
+            time.sleep(0.3)
+
+    # ── 1b. Clôture anticipée SY : YES ≥ 99¢ ───────────────────────────────────
+    # Quand le prix YES atteint 99¢, l'événement est quasi certain.
+    # On vend les tokens YES maintenant pour encaisser le gain et libérer le capital
+    # plutôt que d'attendre la résolution (qui peut prendre encore 1-48h).
+    EARLY_CLOSE_YES_SY_THRESHOLD = 0.99   # vendre quand YES ≥ 99¢
+
+    if not dry_run and client:
+        for mid in list(portfolio["positions_ouvertes"].keys()):
+            pos = portfolio["positions_ouvertes"][mid]
+            if pos.get("direction") != "YES" or pos.get("strategy") != "SY":
+                continue   # seulement les positions SY (achat YES)
+
+            market = get_market(mid)
+            if market is None:
+                continue
+            current_yp = parse_yes_price(market)
+            if current_yp is None or current_yp < EARLY_CLOSE_YES_SY_THRESHOLD:
+                continue   # pas encore à 99¢
+
+            # Calculer le nombre de tokens YES détenus
+            entry_yes_price = pos["entry_price_yes"]
+            if entry_yes_price <= 0:
+                continue
+            tokens_held = pos["bet_amount"] / entry_yes_price
+
+            # Prix minimum pour sortir sans P&L négatif (couvre les frais)
+            breakeven_price = entry_yes_price / (1.0 - POLYMARKET_FEE)
+
+            yes_token = get_yes_token_id(market)
+            if not yes_token:
+                continue
+
+            # Vérifier que la liquidité couvre la vente
+            if not check_sell_liquidity(client, yes_token, tokens_held, breakeven_price):
+                logger.info(f"  [HOLD SY] {mid[:10]}... – YES={current_yp:.4f} "
+                            f"mais liquidité insuffisante, on attend la résolution")
+                continue
+
+            # Vendre les tokens YES
+            resp = sell_yes_position(client, yes_token, tokens_held, breakeven_price)
+            if resp:
+                sale_price = float(resp.get("price", current_yp))
+                proceeds   = tokens_held * sale_price * (1.0 - POLYMARKET_FEE)
+                profit     = round(proceeds - pos["bet_amount"], 2)
+                close_position(portfolio, mid, outcome=1, override_profit=profit)
+                nb_early += 1
+                logger.success(f"  [CLOTURE SY 99¢] {pos.get('question','')[:50]} | "
                                f"YES={current_yp:.4f} | profit={profit:+.2f}$")
             time.sleep(0.3)
 
@@ -459,9 +520,22 @@ def run_once(dry_run: bool = False):
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
 
-        # Déjà en portefeuille (une seule position par marché, S3 prioritaire)
+        # Déjà en portefeuille sur CE marché exact
         if any(p["market_id"] == mid
                for p in portfolio["positions_ouvertes"].values()):
+            continue
+
+        # Même événement parent (neg-risk / primaires / multi-candidats) :
+        # si on a déjà une position sur un autre candidat du même événement,
+        # on ne bet pas — une seule position par événement, sinon un candidat
+        # annule forcément l'autre et on perd à coup sûr sur l'une des lignes.
+        cond_id = str(m.get("conditionId") or m.get("condition_id") or "").strip()
+        if cond_id and any(
+            str(p.get("condition_id", "")) == cond_id
+            for p in portfolio["positions_ouvertes"].values()
+        ):
+            logger.debug(f"  [SKIP] {str(m.get('question',''))[:50]} "
+                         f"— événement déjà en portefeuille (conditionId={cond_id[:12]}...)")
             continue
 
         # Mise = min(5% × capital total, 200$, USDC disponible - 5$ de réserve)

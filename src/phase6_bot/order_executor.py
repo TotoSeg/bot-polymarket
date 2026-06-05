@@ -354,6 +354,36 @@ def sell_no_position(client: ClobClient, token_id: str,
         return None
 
 
+# ── Placement d'ordre vente YES (CLOB V2) ────────────────────────────────────
+
+def sell_yes_position(client: ClobClient, token_id: str,
+                      amount_tokens: float, min_price: float) -> Optional[dict]:
+    """
+    Vend amount_tokens de tokens YES via CLOB V2 (ordre FAK).
+    Utilisé pour la clôture anticipée des positions SY quand YES ≥ 99¢.
+    """
+    amount_tokens = max(round(amount_tokens, 6), 0.000001)
+    try:
+        resp = client.create_and_post_market_order(
+            order_args = MarketOrderArgs(
+                token_id   = token_id,
+                amount     = amount_tokens,
+                side       = Side.SELL,
+                order_type = OrderType.FAK,
+            ),
+            options    = PartialCreateOrderOptions(tick_size="0.01"),
+            order_type = OrderType.FAK,
+        )
+        logger.success(
+            f"  Vente YES : token={token_id[:15]}...  "
+            f"{amount_tokens:.4f} tokens (prix min souhaité {min_price:.3f}) | resp={resp}"
+        )
+        return resp
+    except Exception as e:
+        logger.error(f"  Vente YES échouée (token={token_id[:15]}...) : {e}")
+        return None
+
+
 # ── Positions ouvertes sur Polymarket ────────────────────────────────────────
 
 def get_all_clob_positions() -> list[dict]:

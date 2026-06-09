@@ -47,6 +47,7 @@ from src.phase6_bot.order_executor import (
     build_client, create_api_keys, get_no_token_id, get_yes_token_id, check_liquidity,
     place_no_order, place_yes_order, get_usdc_balance,
     check_sell_liquidity, sell_no_position, sell_yes_position,
+    place_gtc_sell_no, place_gtc_sell_yes,
     get_all_clob_positions, get_total_portfolio_value,
 )
 from src.phase6_bot.notion_reporter import update_notion_report
@@ -285,10 +286,10 @@ def run_once(dry_run: bool = False):
                 continue
 
             # Vérifier la liquidité côté vente.
-            # Quand YES ≤ 0.01¢, le marché est quasi résolu : on force la vente
-            # même si le carnet est mince (min_price=0 = accepter n'importe quel prix).
-            # Si YES est entre 0.01¢ et 1¢, on reste strict sur le breakeven.
-            force_sell   = current_yp <= 0.001   # YES < 0.1¢ → forcer
+            # Dès que YES ≤ seuil de clôture anticipée (1%), on force la vente
+            # sans vérifier le carnet d'ordres (souvent vide sur marchés en fin de vie).
+            # min_price=0 = accepter n'importe quel prix disponible.
+            force_sell   = current_yp <= EARLY_CLOSE_YES_THRESHOLD   # YES ≤ 1% → forcer
             check_price  = 0.0 if force_sell else breakeven_price
 
             if not force_sell and not check_sell_liquidity(
@@ -584,6 +585,21 @@ def run_once(dry_run: bool = False):
                 logger.info(f"  [ENTREE] {strategy:3s} | {end_str} | "
                             f"{str(m.get('question',''))[:45]:45s} | "
                             f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={actual_bet:.2f}$ | dir={direction}")
+
+                # Ordre GTC immédiat : vendre automatiquement quand NO atteint 99¢ (ou YES 99¢).
+                # Set-and-forget : le CLOB Polymarket l'exécute sans que le bot n'ait à tourner.
+                time.sleep(0.2)
+                if is_sy:
+                    # SY : vendre tokens YES quand YES = 99¢
+                    tokens_gtc = actual_bet / yp if yp > 0 else 0
+                    if tokens_gtc > 0.01:
+                        place_gtc_sell_yes(client, token, tokens_gtc, limit_price=0.99)
+                else:
+                    # S3/SP : vendre tokens NO quand NO = 99¢ (= YES ≤ 1¢)
+                    no_price_entry = 1.0 - yp
+                    tokens_gtc = actual_bet / no_price_entry if no_price_entry > 0 else 0
+                    if tokens_gtc > 0.01:
+                        place_gtc_sell_no(client, token, tokens_gtc, limit_price=0.99)
             else:
                 skipped += 1
             time.sleep(0.3)

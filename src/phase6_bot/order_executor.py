@@ -20,6 +20,7 @@ from py_clob_client_v2 import (
     ClobClient,
     ApiCreds,
     MarketOrderArgs,
+    LimitOrderArgs,
     OrderType,
     PartialCreateOrderOptions,
     Side,
@@ -381,6 +382,66 @@ def sell_yes_position(client: ClobClient, token_id: str,
         return resp
     except Exception as e:
         logger.error(f"  Vente YES échouée (token={token_id[:15]}...) : {e}")
+        return None
+
+
+# ── Ordre limite GTC de vente ────────────────────────────────────────────────
+
+def place_gtc_sell_no(client: ClobClient, token_id: str,
+                      tokens: float, limit_price: float = 0.99) -> Optional[dict]:
+    """
+    Place un ordre limite GTC (Good Till Cancelled) pour vendre tokens NO à limit_price.
+    L'ordre reste dans le carnet Polymarket jusqu'à exécution automatique.
+    À utiliser immédiatement après un achat NO pour garantir la sortie à 99¢.
+
+    Args:
+        token_id    : token_id du NO
+        tokens      : nombre de tokens NO à vendre (= mise / prix_entrée_NO)
+        limit_price : prix limite de vente (défaut 0.99 = NO à 99¢)
+    """
+    tokens = max(round(tokens, 4), 0.01)
+    try:
+        resp = client.create_and_post_order(
+            LimitOrderArgs(
+                token_id = token_id,
+                price    = str(limit_price),
+                size     = str(tokens),
+                side     = Side.SELL,
+            ),
+            options = PartialCreateOrderOptions(tick_size="0.01"),
+        )
+        logger.success(
+            f"  Ordre GTC vente NO : {tokens:.4f} tokens @ {limit_price:.2f} | resp={resp}"
+        )
+        return resp
+    except Exception as e:
+        logger.error(f"  Ordre GTC vente NO échoué (token={token_id[:15]}...) : {e}")
+        return None
+
+
+def place_gtc_sell_yes(client: ClobClient, token_id: str,
+                       tokens: float, limit_price: float = 0.99) -> Optional[dict]:
+    """
+    Place un ordre limite GTC pour vendre tokens YES à limit_price.
+    À utiliser après un achat YES (SY) pour garantir la sortie à 99¢.
+    """
+    tokens = max(round(tokens, 4), 0.01)
+    try:
+        resp = client.create_and_post_order(
+            LimitOrderArgs(
+                token_id = token_id,
+                price    = str(limit_price),
+                size     = str(tokens),
+                side     = Side.SELL,
+            ),
+            options = PartialCreateOrderOptions(tick_size="0.01"),
+        )
+        logger.success(
+            f"  Ordre GTC vente YES : {tokens:.4f} tokens @ {limit_price:.2f} | resp={resp}"
+        )
+        return resp
+    except Exception as e:
+        logger.error(f"  Ordre GTC vente YES échoué (token={token_id[:15]}...) : {e}")
         return None
 
 

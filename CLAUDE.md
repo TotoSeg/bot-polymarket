@@ -37,3 +37,13 @@ Respecter strictement l'arborescence décrite dans ARCHITECTURE.md.
 
 ## Contexte utilisateur
 Niveau Python basique — commenter le code abondamment, expliquer les choix techniques.
+
+# Nouveau module LP farming — lire avant toute action sur le LP
+
+Trois fichiers de contexte à lire dans cet ordre avant de travailler sur le bot LP :
+1. ./polymarket_common_setup.md
+2. ./polymarket_migration_instructions.md
+3. ./polymarket_lp_bot_context.md
+
+Ne pas commencer à coder le bot LP avant d'avoir lu les trois
+et fait l'audit décrit dans polymarket_migration_instructions.md étape 1.

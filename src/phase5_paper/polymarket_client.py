@@ -109,6 +109,12 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
         event_id  = str(event.get("id", "")).strip()
         # Volume de l'event parent : fallback quand le sous-marché ne l'a pas
         event_vol = float(event.get("volume", 0) or 0)
+        # endDate de l'event parent : fallback si absent sur le sous-marché.
+        # Les events restricted (élections) ne mettent pas toujours endDate
+        # sur chaque sous-marché → parse_end_date retournerait 9999-12-31
+        # et le marché serait filtré comme "trop lointain" (>10j).
+        event_end = event.get("endDate") or event.get("endDateIso") or ""
+
         for m in (event.get("markets") or []):
             if m.get("closed"):
                 continue
@@ -116,6 +122,9 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
             vol = float(m.get("volume", 0) or 0) or event_vol
             if vol < min_volume:
                 continue
+            # Injecter endDate depuis l'event si manquant sur le sous-marché
+            if not m.get("endDate") and not m.get("endDateIso") and event_end:
+                m["endDate"] = event_end
             mid = str(m.get("id", ""))
             if mid and mid not in seen_ids:
                 m["_event_id"] = event_id

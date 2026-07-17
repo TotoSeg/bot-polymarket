@@ -158,6 +158,36 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
         offset += PAGE_SIZE
         time.sleep(REQUEST_DELAY)
 
+    # ── Pagination restricted=true (élections, événements spéciaux) ──────────
+    # Ces événements n'apparaissent PAS dans la pagination standard.
+    # Exemples : São Tomé presidential election, Iran ceasefire, etc.
+    offset = 0
+    for page in range(max_pages):
+        try:
+            resp = requests.get(
+                f"{GAMMA_API}/events",
+                params={"closed": "false", "restricted": "true",
+                        "limit": PAGE_SIZE, "offset": offset},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            events = resp.json()
+        except requests.RequestException as e:
+            logger.warning(f"Erreur /events restricted page {page} : {e}")
+            break
+
+        if not events:
+            break
+
+        for event in events:
+            _add_sub_markets(event)
+
+        if len(events) < PAGE_SIZE:
+            break
+
+        offset += PAGE_SIZE
+        time.sleep(REQUEST_DELAY)
+
     logger.info(f"Marchés via /events récupérés (vol >= {min_volume}$) : {len(all_markets)}")
     return all_markets
 

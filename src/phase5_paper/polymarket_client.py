@@ -86,16 +86,22 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
     Récupère les marchés contenus dans les événements Gamma (endpoint /events).
 
     Sources combinées (dans l'ordre) :
-      1. PRIORITY_SLUGS — événements stratégiques toujours inclus
-      2. /events?closed=false — pagination standard (arrêt naturel sur page vide)
-      3. /events?closed=false&restricted=true — élections, événements spéciaux
+      1. PRIORITY_SLUGS — événements stratégiques toujours inclus (fallback slug)
+      2. /events?closed=false — pagination standard
+      3. /events?closed=false&order_by=volume&ascending=false — tri volume décroissant
+      4. /events?closed=false&restricted=true — élections, événements spéciaux
+      5. /events?tag_id=2  (Politics)     — présidentielles, législatives
+      6. /events?tag_id=100265 (Geopolitics) — conflits, organisations internationales
+      7. /events?tag_id=100 (World Events) — divers événements mondiaux
+    Les passes 5-7 sont la méthode systématique pour attraper les élections comme
+    São Tomé qui ont restricted=True mais n'apparaissent pas dans la pagination
+    restricted=true (bug API Gamma confirmé).
 
     Corrections critiques vs version précédente :
-      - max_pages=100 par défaut (avant 20) : évite de rater des events page 20+
+      - tag_id numérique (pas tag=string) : seule façon fiable de filtrer par catégorie
       - Volume fallback : si le sous-marché a vol=0, on utilise le volume de l'event
         parent — en élection multi-candidats le volume est souvent à l'event level
-      - Arrêt naturel sur réponse vide (pas de cap artificiel à max_pages si l'API
-        répond encore)
+      - endDate fallback depuis l'event parent si absent sur le sous-marché
     """
     # Événements stratégiques à toujours inclure via fetch par slug.
     # Certains events ont restricted=True dans l'API mais n'apparaissent PAS dans
@@ -213,11 +219,16 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
     # ── Pagination restricted=true ────────────────────────────────────────────
     _paginate({"restricted": "true"}, "restricted")
 
-    # ── Pagination par tags politiques ────────────────────────────────────────
-    # Certains events politiques/élections ne sont ni dans standard ni restricted.
-    # Tentative par tags — silencieux si l'API ne supporte pas le paramètre.
-    for tag in ["politics", "elections", "geopolitics", "world"]:
-        _paginate({"tag": tag}, f"tag={tag}")
+    # ── Pagination par tag_id numériques ─────────────────────────────────────
+    # tag_id numérique = seule façon fiable de filtrer par catégorie sur Gamma API.
+    # tag=string (ancienne approche) ne couvre pas les sous-tags ni les events
+    # restreints. Ici on cible les 3 catégories qui contiennent des élections :
+    #   2       = Politics (présidentielles, législatives)
+    #   100265  = Geopolitics (conflits, traités, organisations internationales)
+    #   100     = World Events (divers événements mondiaux hors crypto)
+    # related_tags=true inclut les sous-catégories imbriquées.
+    for tag_id in ["2", "100265", "100"]:
+        _paginate({"tag_id": tag_id, "related_tags": "true"}, f"tag_id={tag_id}")
 
     logger.info(f"Marchés via /events récupérés (vol >= {min_volume}$) : {len(all_markets)}")
     return all_markets

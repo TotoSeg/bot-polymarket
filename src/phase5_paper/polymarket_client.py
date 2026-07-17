@@ -141,8 +141,9 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
                 all_markets.append(m)
                 seen_ids.add(mid)
 
-    def _paginate(params_extra: dict, label: str):
-        """Pagine un endpoint /events jusqu'à réponse vide (max max_pages pages)."""
+    def _paginate(params_extra: dict, label: str, stop_on_http_error: bool = True):
+        """Pagine /events jusqu'à réponse vide (max max_pages pages).
+        Retourne False si l'API rejette les paramètres (ex: param non supporté)."""
         offset = 0
         for page in range(max_pages):
             try:
@@ -152,6 +153,9 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
                             "offset": offset, **params_extra},
                     timeout=15,
                 )
+                if resp.status_code in (400, 422):
+                    logger.debug(f"/events {label} : paramètres non supportés (HTTP {resp.status_code})")
+                    return False
                 resp.raise_for_status()
                 events = resp.json()
             except requests.RequestException as e:
@@ -159,7 +163,6 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
                 break
 
             if not events:
-                logger.debug(f"/events {label} : fin naturelle à page {page} (offset {offset})")
                 break
 
             for event in events:
@@ -170,6 +173,7 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
 
             offset += PAGE_SIZE
             time.sleep(REQUEST_DELAY)
+        return True
 
     # ── Fetch prioritaire par slug ────────────────────────────────────────────
     for slug in PRIORITY_SLUGS:
@@ -187,10 +191,33 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
     # ── Pagination standard ───────────────────────────────────────────────────
     _paginate({}, "standard")
 
+    # ── Pagination triée par volume décroissant ───────────────────────────────
+    # Les events à fort volume (élections, géopolitique) arrivent en premier.
+    # Certain events comme São Tomé ont restricted=True mais n'apparaissent PAS
+    # dans la pagination restricted=true (bug API Gamma). En triant par volume,
+    # on les attrape dans les premières pages quelle que soit leur catégorie.
+    # On essaie plusieurs variantes de params car l'API n'est pas documentée.
+    volume_sorted = False
+    for sort_params in [
+        {"order_by": "volume", "ascending": "false"},
+        {"order_by": "volume24hr", "ascending": "false"},
+        {"sort": "volume", "direction": "desc"},
+    ]:
+        if _paginate({**sort_params}, f"volume-sort({list(sort_params.keys())[0]})"):
+            volume_sorted = True
+            break
+
+    if not volume_sorted:
+        logger.debug("Tri par volume non supporté par l'API Gamma — couverture standard uniquement")
+
     # ── Pagination restricted=true ────────────────────────────────────────────
-    # Élections, événements politiques sensibles — absents de la pagination standard.
-    # Attention : ces events peuvent être nombreux (>2000), d'où max_pages=100.
     _paginate({"restricted": "true"}, "restricted")
+
+    # ── Pagination par tags politiques ────────────────────────────────────────
+    # Certains events politiques/élections ne sont ni dans standard ni restricted.
+    # Tentative par tags — silencieux si l'API ne supporte pas le paramètre.
+    for tag in ["politics", "elections", "geopolitics", "world"]:
+        _paginate({"tag": tag}, f"tag={tag}")
 
     logger.info(f"Marchés via /events récupérés (vol >= {min_volume}$) : {len(all_markets)}")
     return all_markets

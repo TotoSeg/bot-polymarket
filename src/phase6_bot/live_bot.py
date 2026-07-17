@@ -531,6 +531,7 @@ def run_once(dry_run: bool = False):
         # si on a déjà une position sur un autre candidat du même événement,
         # on ne bet pas — une seule position par événement, sinon un candidat
         # annule forcément l'autre et on perd à coup sûr sur l'une des lignes.
+        # Garde 1 : conditionId identique (marchés partageant le même contrat CTF)
         cond_id = str(m.get("conditionId") or m.get("condition_id") or "").strip()
         if cond_id and any(
             str(p.get("condition_id", "")) == cond_id
@@ -538,6 +539,20 @@ def run_once(dry_run: bool = False):
         ):
             logger.debug(f"  [SKIP] {str(m.get('question',''))[:50]} "
                          f"— événement déjà en portefeuille (conditionId={cond_id[:12]}...)")
+            continue
+
+        # Garde 2 : event_id identique (élections multi-candidats où chaque
+        # candidat a son propre conditionId mais ils partagent le même événement).
+        # Empêche : SY sur candidat A + S3/SP sur candidat B du même scrutin.
+        # Si les deux candidats peuvent gagner l'un contre l'autre, on perd
+        # nécessairement sur l'une des deux positions.
+        event_id = str(m.get("_event_id", "")).strip()
+        if event_id and any(
+            str(p.get("event_id", "")) == event_id
+            for p in portfolio["positions_ouvertes"].values()
+        ):
+            logger.debug(f"  [SKIP] {str(m.get('question',''))[:50]} "
+                         f"— événement Gamma déjà en portefeuille (event_id={event_id[:12]}...)")
             continue
 
         # Mise = min(5% × capital total, 200$, USDC disponible - 5$ de réserve)

@@ -139,10 +139,17 @@ def add_position(portfolio: dict, market: dict, strategy: str,
         market.get("conditionId") or market.get("condition_id") or ""
     ).strip()
 
+    # ID de l'événement Gamma parent (injecté par get_active_event_markets).
+    # Différent du conditionId : dans une élection multi-candidats, chaque
+    # candidat a un conditionId distinct mais tous partagent le même event_id.
+    # Utilisé pour bloquer SY sur candidat A + S3/SP sur candidat B du même event.
+    event_id = str(market.get("_event_id", "")).strip()
+
     portfolio["capital_disponible"] -= bet_amount
     portfolio["positions_ouvertes"][market_id] = {
         "market_id":        market_id,
         "condition_id":     condition_id,   # identifiant de l'événement parent
+        "event_id":         event_id,       # ID événement Gamma (élections multi-candidats)
         "question":         str(market.get("question", ""))[:80],
         "strategy":         strategy,
         "direction":        direction,   # "NO" (S3/SP) ou "YES" (SY)

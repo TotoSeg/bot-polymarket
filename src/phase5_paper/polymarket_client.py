@@ -103,6 +103,7 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
     seen_ids    = set()
 
     def _add_sub_markets(event):
+        event_id = str(event.get("id", "")).strip()
         for m in (event.get("markets") or []):
             if m.get("closed"):
                 continue
@@ -111,6 +112,9 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
                 continue
             mid = str(m.get("id", ""))
             if mid and mid not in seen_ids:
+                # Injecter l'ID de l'événement parent pour bloquer les
+                # positions croisées (SY sur A + S3 sur B du même event)
+                m["_event_id"] = event_id
                 all_markets.append(m)
                 seen_ids.add(mid)
 

@@ -405,7 +405,7 @@ def run_once(dry_run: bool = False):
 
     # Source 2 : endpoint /events (marchés neg-risk groupés, ex: Iran ceasefire)
     # Fusionnés par ID pour éviter les doublons
-    event_markets = get_active_event_markets(min_volume=min_vol, max_pages=20)
+    event_markets = get_active_event_markets(min_volume=min_vol)
     # Index par id pour pouvoir injecter _event_id sur les marchés déjà présents
     markets_by_id = {str(m.get("id", "")): m for m in markets}
     existing_ids  = set(markets_by_id.keys())

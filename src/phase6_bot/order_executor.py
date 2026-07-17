@@ -20,7 +20,7 @@ from py_clob_client_v2 import (
     ClobClient,
     ApiCreds,
     MarketOrderArgs,
-    LimitOrderArgs,
+    OrderArgs,
     OrderType,
     PartialCreateOrderOptions,
     Side,
@@ -402,10 +402,10 @@ def place_gtc_sell_no(client: ClobClient, token_id: str,
     tokens = max(round(tokens, 4), 0.01)
     try:
         resp = client.create_and_post_order(
-            LimitOrderArgs(
+            OrderArgs(
                 token_id = token_id,
-                price    = str(limit_price),
-                size     = str(tokens),
+                price    = float(limit_price),
+                size     = float(tokens),
                 side     = Side.SELL,
             ),
             options = PartialCreateOrderOptions(tick_size="0.01"),
@@ -428,10 +428,10 @@ def place_gtc_sell_yes(client: ClobClient, token_id: str,
     tokens = max(round(tokens, 4), 0.01)
     try:
         resp = client.create_and_post_order(
-            LimitOrderArgs(
+            OrderArgs(
                 token_id = token_id,
-                price    = str(limit_price),
-                size     = str(tokens),
+                price    = float(limit_price),
+                size     = float(tokens),
                 side     = Side.SELL,
             ),
             options = PartialCreateOrderOptions(tick_size="0.01"),

@@ -499,7 +499,7 @@ def place_orders(asset: str, signal: int, market: dict,
         # Import ici pour ne pas casser le mode paper si le module est absent
         try:
             from py_clob_client_v2 import MarketOrderArgs, OrderType, PartialCreateOrderOptions, Side
-            from py_clob_client_v2 import LimitOrderArgs
+            from py_clob_client_v2 import OrderArgs
         except ImportError as e:
             log(f"  [{asset}] Import py-clob-client-v2 échoué : {e}")
             return None
@@ -527,10 +527,10 @@ def place_orders(asset: str, signal: int, market: dict,
                 # Cet ordre dort dans le carnet et s'exécute seul sans monitoring
                 hedge_tokens = HEDGE_AMOUNT / HEDGE_PRICE
                 hedge_order = client.create_and_post_order(
-                    LimitOrderArgs(
+                    OrderArgs(
                         token_id = oppose_token,
-                        price    = str(HEDGE_PRICE),
-                        size     = str(round(hedge_tokens, 2)),
+                        price    = float(HEDGE_PRICE),
+                        size     = float(round(hedge_tokens, 2)),
                         side     = Side.BUY,
                     ),
                     options = opts,
@@ -541,10 +541,10 @@ def place_orders(asset: str, signal: int, market: dict,
 
                 # 3. Ordre limite GTC : vendre la position principale à 95¢
                 sell_order = client.create_and_post_order(
-                    LimitOrderArgs(
+                    OrderArgs(
                         token_id = buy_token,
-                        price    = str(SELL_PRICE),
-                        size     = str(round(tokens, 2)),
+                        price    = float(SELL_PRICE),
+                        size     = float(round(tokens, 2)),
                         side     = Side.SELL,
                     ),
                     options = opts,

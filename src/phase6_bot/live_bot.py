@@ -44,13 +44,14 @@ from src.phase5_paper.paper_portfolio    import (
     load_portfolio, save_portfolio, add_position, close_position, print_summary,
 )
 from src.phase6_bot.order_executor import (
-    build_client, create_api_keys, get_no_token_id, get_yes_token_id, check_liquidity,
+    get_no_token_id, get_yes_token_id, check_liquidity,
     place_no_order, place_yes_order, get_usdc_balance,
     check_sell_liquidity, sell_no_position, sell_yes_position,
     place_gtc_sell_no, place_gtc_sell_yes,
     get_all_clob_positions, get_total_portfolio_value,
 )
 from src.phase6_bot.notion_reporter import update_notion_report
+from src.polymarket_common.client import build_directional_client, create_api_keys
 
 PROJECT_ROOT   = Path(__file__).resolve().parents[2]
 OUT_DIR        = PROJECT_ROOT / "outputs" / "phase6"
@@ -245,7 +246,7 @@ def run_once(dry_run: bool = False):
       5. Placer les ordres NO (ou simuler si dry_run=True)
     """
     portfolio = load_portfolio(PORTFOLIO_FILE)
-    client    = None if dry_run else build_client()
+    client    = None if dry_run else build_directional_client()
 
     logger.info("=" * 60)
     logger.info(f"LIVE BOT S3+SP – {datetime.now().strftime('%Y-%m-%d %H:%M')} "
@@ -382,7 +383,7 @@ def run_once(dry_run: bool = False):
     # capital_disponible = solde USDC réel. C'est toujours la source de vérité.
     # capital_total      = USDC + valeur des positions (base du calcul Kelly).
     # En dry-run on fait aussi la synchro (lecture seule) pour avoir le vrai capital.
-    _sync_client = client if not dry_run else build_client()
+    _sync_client = client if not dry_run else build_directional_client()
     try:
         real_balance = get_usdc_balance(_sync_client)
         portfolio["capital_disponible"] = round(real_balance, 2)
@@ -629,7 +630,7 @@ def run_cleanup(dry_run: bool = False):
     Si la vente échoue (pas de liquidité), signale la position pour clôture manuelle.
     """
     portfolio = load_portfolio(PORTFOLIO_FILE)
-    client    = None if dry_run else build_client()
+    client    = None if dry_run else build_directional_client()
     cutoff    = datetime(2026, 5, 31, 23, 59, 59, tzinfo=timezone.utc)
     now_utc   = datetime.now(tz=timezone.utc)
 
@@ -784,8 +785,15 @@ def cmd_create_keys():
     if not pk or pk == "0x_VOTRE_CLE_PRIVEE_ICI":
         logger.error("Remplir POLYMARKET_PRIVATE_KEY dans .env avant de générer les clés")
         return
+    funder = os.environ.get("POLYMARKET_PROXY_WALLET", "").strip() or None
+    if not funder:
+        logger.error("Remplir POLYMARKET_PROXY_WALLET dans .env avant de générer les clés")
+        return
     logger.info("Génération des clés API Polymarket...")
-    creds = create_api_keys(pk)
+    # signature_type=2 (GNOSIS_SAFE) + funder=POLYMARKET_PROXY_WALLET : forcés
+    # explicitement pour générer des credentials liés au wallet proxy du bot
+    # directionnel, et non à un EOA par défaut.
+    creds = create_api_keys(pk, signature_type=2, funder=funder)
     logger.success("Clés générées – copier dans .env :")
     for k, v in creds.items():
         print(f"  POLYMARKET_{k.upper()}={v}")
@@ -794,7 +802,7 @@ def cmd_create_keys():
 def cmd_status():
     portfolio = load_portfolio(PORTFOLIO_FILE)
     try:
-        client  = build_client()
+        client  = build_directional_client()
         balance = get_usdc_balance(client)
         portfolio["capital_disponible"] = round(balance, 2)
         logger.info(f"Solde USDC wallet : {balance:.2f} USDC")

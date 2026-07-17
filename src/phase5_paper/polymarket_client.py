@@ -97,10 +97,20 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
       - Arrêt naturel sur réponse vide (pas de cap artificiel à max_pages si l'API
         répond encore)
     """
-    # Événements stratégiques à toujours inclure (absents ou trop loin dans la pagination)
+    # Événements stratégiques à toujours inclure via fetch par slug.
+    # Certains events ont restricted=True dans l'API mais n'apparaissent PAS dans
+    # la pagination /events?restricted=true (bug API Gamma confirmé sur São Tomé).
+    # Ajouter ici les slugs d'élections ou d'events politiques importants.
+    # Configurable aussi via la variable d'env EXTRA_SLUGS (slugs séparés par des virgules).
+    import os as _os
     PRIORITY_SLUGS = [
         "iran-ceasefire-continues-through",
+        # Présidentielle São Tomé-et-Príncipe 2026 (absent de la pagination restricted)
+        "sao-tome-and-principe-presidential-election-winner-20260623195739298",
     ]
+    extra = _os.getenv("EXTRA_SLUGS", "").strip()
+    if extra:
+        PRIORITY_SLUGS += [s.strip() for s in extra.split(",") if s.strip()]
 
     all_markets = []
     seen_ids    = set()

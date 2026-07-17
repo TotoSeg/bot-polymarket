@@ -22,7 +22,7 @@ Usage :
     python src/phase6_bot/live_bot.py --cleanup       # ferme positions hors règles + résolution > 31/05
 """
 
-import sys, os, time, json, argparse
+import sys, os, time, json, argparse, copy
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -447,8 +447,9 @@ def run_once(dry_run: bool = False):
 
     # Collecter les signaux S3 + SP, filtrer et trier
     candidates = []
-    skipped_14d = 0
-    skipped_gain = 0
+    skipped_14d   = 0
+    skipped_gain  = 0
+    skipped_range = 0   # hors plage de prix (YES < 5% ou 35-92% ou > 98%)
     sy_cutoff = now_utc + timedelta(hours=SY_MAX_HOURS)
 
     for m in markets:
@@ -465,6 +466,7 @@ def run_once(dry_run: bool = False):
         in_sy_range = SY_YES_MIN <= yp <= SY_YES_MAX
 
         if not in_sp_range and not in_sy_range:
+            skipped_range += 1
             continue
 
         end_dt = parse_end_date(m)
@@ -523,13 +525,19 @@ def run_once(dry_run: bool = False):
     candidates.sort(key=lambda x: (x[2], x[1], x[0], x[3]))
 
     logger.info(f"Candidats : {len(candidates)} | Ignorés (>{MAX_DAYS_TO_RESOLUTION}j) : {skipped_14d} | "
-                f"Ignorés (EV<5%) : {skipped_gain}")
+                f"Ignorés (EV<5%) : {skipped_gain} | Ignorés (hors plage prix) : {skipped_range}")
 
     if not candidates and portfolio["capital_disponible"] > 1.0:
         logger.info(f"Aucun marché éligible dans la fenêtre {MAX_DAYS_TO_RESOLUTION} jours. "
                     "Capital conservé, on attend l'ouverture de nouveaux marchés.")
 
     # ── 5. Placer les ordres ─────────────────────────────────────────────────
+    # En dry-run : prendre un snapshot du portfolio AVANT d'ajouter des positions
+    # pour pouvoir sauvegarder l'état réel (capital synchro uniquement) en fin de cycle.
+    # Sans ça, chaque dry-run pollue le JSON avec de fausses positions qui bloquent
+    # les vrais candidats lors du cycle suivant.
+    _portfolio_snapshot = copy.deepcopy(portfolio) if dry_run else None
+
     for _cat_prio, _strategy_prio, end_dt, _neg_score, m, sig, yp, ev in candidates:
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
@@ -649,7 +657,12 @@ def run_once(dry_run: bool = False):
         if real_balance > 0:
             portfolio["capital_disponible"] = round(real_balance, 2)
 
-    save_portfolio(portfolio, PORTFOLIO_FILE)
+    # En dry-run : sauvegarder le snapshot (capital synchro, sans les fausses positions).
+    # En cycle réel : sauvegarder le portfolio complet avec les nouvelles positions.
+    if dry_run and _portfolio_snapshot is not None:
+        save_portfolio(_portfolio_snapshot, PORTFOLIO_FILE)
+    else:
+        save_portfolio(portfolio, PORTFOLIO_FILE)
     print_summary(portfolio)
     logger.success("Cycle terminé.")
 

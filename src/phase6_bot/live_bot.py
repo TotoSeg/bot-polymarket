@@ -457,9 +457,16 @@ def run_once(dry_run: bool = False):
         if not yp:
             continue
 
-        # Exclure les marchés pouvant résoudre "other" ou à risque de non-événement
-        q_raw = str(m.get("question", ""))
-        if _has_other_outcome(m) or _is_other_risk(q_raw):
+        # Exclure les marchés pouvant résoudre "other" ou à risque de non-événement.
+        # Exception : marchés neg-risk avec _event_id — le "Other" dans les outcomes
+        # désigne "un autre candidat gagne", ce qui est bien géré par le YES/NO du
+        # sous-marché. Ces marchés ne risquent pas la résolution "other" au sens
+        # d'un événement non-binaire.
+        q_raw     = str(m.get("question", ""))
+        is_neg_risk = bool(m.get("_event_id"))
+        if _is_other_risk(q_raw):
+            continue
+        if not is_neg_risk and _has_other_outcome(m):
             continue
 
         in_sp_range = 0.05 <= yp <= 0.35

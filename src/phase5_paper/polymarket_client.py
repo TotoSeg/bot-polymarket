@@ -81,20 +81,23 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
     return all_markets
 
 
-def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> list[dict]:
+def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) -> list[dict]:
     """
     Récupère les marchés contenus dans les événements Gamma (endpoint /events).
 
-    Les marchés neg-risk groupés (ex: "by May 26?", "by May 27?") n'apparaissent
-    pas dans /markets mais sont accessibles via /events → chaque event contient
-    un tableau 'markets' avec les sous-marchés individuels.
+    Sources combinées (dans l'ordre) :
+      1. PRIORITY_SLUGS — événements stratégiques toujours inclus
+      2. /events?closed=false — pagination standard (arrêt naturel sur page vide)
+      3. /events?closed=false&restricted=true — élections, événements spéciaux
 
-    Les événements "restricted" (ex: Iran ceasefire) n'apparaissent pas dans la
-    pagination standard → on les fetch directement par slug via PRIORITY_SLUGS.
-
-    Retourne une liste plate de marchés, dans le même format que get_active_markets().
+    Corrections critiques vs version précédente :
+      - max_pages=100 par défaut (avant 20) : évite de rater des events page 20+
+      - Volume fallback : si le sous-marché a vol=0, on utilise le volume de l'event
+        parent — en élection multi-candidats le volume est souvent à l'event level
+      - Arrêt naturel sur réponse vide (pas de cap artificiel à max_pages si l'API
+        répond encore)
     """
-    # Événements à toujours inclure car absents de la pagination standard (restricted=true)
+    # Événements stratégiques à toujours inclure (absents ou trop loin dans la pagination)
     PRIORITY_SLUGS = [
         "iran-ceasefire-continues-through",
     ]
@@ -103,29 +106,56 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
     seen_ids    = set()
 
     def _add_sub_markets(event):
-        event_id = str(event.get("id", "")).strip()
+        event_id  = str(event.get("id", "")).strip()
+        # Volume de l'event parent : fallback quand le sous-marché ne l'a pas
+        event_vol = float(event.get("volume", 0) or 0)
         for m in (event.get("markets") or []):
             if m.get("closed"):
                 continue
-            vol = float(m.get("volume", 0) or 0)
+            # Utiliser d'abord le volume du sous-marché, sinon celui de l'event
+            vol = float(m.get("volume", 0) or 0) or event_vol
             if vol < min_volume:
                 continue
             mid = str(m.get("id", ""))
             if mid and mid not in seen_ids:
-                # Injecter l'ID de l'événement parent pour bloquer les
-                # positions croisées (SY sur A + S3 sur B du même event)
                 m["_event_id"] = event_id
                 all_markets.append(m)
                 seen_ids.add(mid)
 
+    def _paginate(params_extra: dict, label: str):
+        """Pagine un endpoint /events jusqu'à réponse vide (max max_pages pages)."""
+        offset = 0
+        for page in range(max_pages):
+            try:
+                resp = requests.get(
+                    f"{GAMMA_API}/events",
+                    params={"closed": "false", "limit": PAGE_SIZE,
+                            "offset": offset, **params_extra},
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                events = resp.json()
+            except requests.RequestException as e:
+                logger.warning(f"Erreur /events {label} page {page} : {e}")
+                break
+
+            if not events:
+                logger.debug(f"/events {label} : fin naturelle à page {page} (offset {offset})")
+                break
+
+            for event in events:
+                _add_sub_markets(event)
+
+            if len(events) < PAGE_SIZE:
+                break
+
+            offset += PAGE_SIZE
+            time.sleep(REQUEST_DELAY)
+
     # ── Fetch prioritaire par slug ────────────────────────────────────────────
     for slug in PRIORITY_SLUGS:
         try:
-            resp = requests.get(
-                f"{GAMMA_API}/events",
-                params={"slug": slug},
-                timeout=15,
-            )
+            resp = requests.get(f"{GAMMA_API}/events", params={"slug": slug}, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             if isinstance(data, list):
@@ -136,61 +166,12 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 20) -> 
             logger.warning(f"Erreur fetch slug {slug} : {e}")
 
     # ── Pagination standard ───────────────────────────────────────────────────
-    offset = 0
-    for page in range(max_pages):
-        try:
-            resp = requests.get(
-                f"{GAMMA_API}/events",
-                params={"closed": "false", "limit": PAGE_SIZE, "offset": offset},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            events = resp.json()
-        except requests.RequestException as e:
-            logger.warning(f"Erreur /events page {page} : {e}")
-            break
+    _paginate({}, "standard")
 
-        if not events:
-            break
-
-        for event in events:
-            _add_sub_markets(event)
-
-        if len(events) < PAGE_SIZE:
-            break
-
-        offset += PAGE_SIZE
-        time.sleep(REQUEST_DELAY)
-
-    # ── Pagination restricted=true (élections, événements spéciaux) ──────────
-    # Ces événements n'apparaissent PAS dans la pagination standard.
-    # Exemples : São Tomé presidential election, Iran ceasefire, etc.
-    offset = 0
-    for page in range(max_pages):
-        try:
-            resp = requests.get(
-                f"{GAMMA_API}/events",
-                params={"closed": "false", "restricted": "true",
-                        "limit": PAGE_SIZE, "offset": offset},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            events = resp.json()
-        except requests.RequestException as e:
-            logger.warning(f"Erreur /events restricted page {page} : {e}")
-            break
-
-        if not events:
-            break
-
-        for event in events:
-            _add_sub_markets(event)
-
-        if len(events) < PAGE_SIZE:
-            break
-
-        offset += PAGE_SIZE
-        time.sleep(REQUEST_DELAY)
+    # ── Pagination restricted=true ────────────────────────────────────────────
+    # Élections, événements politiques sensibles — absents de la pagination standard.
+    # Attention : ces events peuvent être nombreux (>2000), d'où max_pages=100.
+    _paginate({"restricted": "true"}, "restricted")
 
     logger.info(f"Marchés via /events récupérés (vol >= {min_volume}$) : {len(all_markets)}")
     return all_markets

@@ -65,9 +65,9 @@ POLYMARKET_FEE = 0.02
 MIN_EXPECTED_GAIN_PCT = 0.05   # 5%
 
 # Fenêtre maximale de résolution par stratégie
-MAX_DAYS_S3 = 5   # S3 : résolution ≤ 5 jours
-MAX_DAYS_SP = 7   # SP : résolution ≤ 7 jours
-MAX_DAYS_TO_RESOLUTION = max(MAX_DAYS_S3, MAX_DAYS_SP)  # filtre global = 7j
+MAX_DAYS_S3 = 10   # S3 : résolution ≤ 10 jours
+MAX_DAYS_SP = 10   # SP : résolution ≤ 10 jours
+MAX_DAYS_TO_RESOLUTION = max(MAX_DAYS_S3, MAX_DAYS_SP)  # filtre global = 10j
 
 # Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 1% = NO gagne à 99%
 EARLY_CLOSE_YES_THRESHOLD = 0.01
@@ -114,7 +114,7 @@ def _is_sport(q: str) -> bool:
 
 SY_YES_MIN       = 0.92
 SY_YES_MAX       = 0.98
-SY_MAX_HOURS     = 48
+SY_MAX_HOURS     = 96
 MIN_EV_SY        = 0.01   # EV minimum 1% pour SY (marges plus faibles qu'en S3/SP)
 
 

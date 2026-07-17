@@ -406,16 +406,28 @@ def run_once(dry_run: bool = False):
     # Source 2 : endpoint /events (marchés neg-risk groupés, ex: Iran ceasefire)
     # Fusionnés par ID pour éviter les doublons
     event_markets = get_active_event_markets(min_volume=min_vol, max_pages=20)
-    existing_ids  = {str(m.get("id", "")) for m in markets}
+    # Index par id pour pouvoir injecter _event_id sur les marchés déjà présents
+    markets_by_id = {str(m.get("id", "")): m for m in markets}
+    existing_ids  = set(markets_by_id.keys())
     added = 0
+    injected = 0
     for m in event_markets:
         mid = str(m.get("id", ""))
-        if mid and mid not in existing_ids:
+        if not mid:
+            continue
+        if mid not in existing_ids:
             markets.append(m)
             existing_ids.add(mid)
             added += 1
+        elif "_event_id" in m and "_event_id" not in markets_by_id[mid]:
+            # Marché déjà présent via /markets : injecter l'event_id pour
+            # que les gardes anti-doublon fonctionnent même pour ces marchés
+            markets_by_id[mid]["_event_id"] = m["_event_id"]
+            injected += 1
     if added:
         logger.info(f"+ {added} marchés supplémentaires via /events (neg-risk)")
+    if injected:
+        logger.debug(f"+ {injected} marchés enrichis avec _event_id depuis /events")
 
     max_bet        = float(os.getenv("MAX_BET_USDC", "200"))
     nb_new         = 0
@@ -521,39 +533,48 @@ def run_once(dry_run: bool = False):
     for _cat_prio, _strategy_prio, end_dt, _neg_score, m, sig, yp, ev in candidates:
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]
+        logger.info(f"  → {strategy} | YES={yp:.3f} | end={end_dt.strftime('%m-%d')} | "
+                    f"{str(m.get('question',''))[:50]}")
 
         # Déjà en portefeuille sur CE marché exact
         if any(p["market_id"] == mid
                for p in portfolio["positions_ouvertes"].values()):
+            logger.info(f"  [SKIP] {str(m.get('question',''))[:50]} — déjà en portefeuille")
             continue
 
         # Même événement parent (neg-risk / primaires / multi-candidats) :
-        # si on a déjà une position sur un autre candidat du même événement,
-        # on ne bet pas — une seule position par événement, sinon un candidat
-        # annule forcément l'autre et on perd à coup sûr sur l'une des lignes.
         # Garde 1 : conditionId identique (marchés partageant le même contrat CTF)
         cond_id = str(m.get("conditionId") or m.get("condition_id") or "").strip()
         if cond_id and any(
             str(p.get("condition_id", "")) == cond_id
             for p in portfolio["positions_ouvertes"].values()
         ):
-            logger.debug(f"  [SKIP] {str(m.get('question',''))[:50]} "
-                         f"— événement déjà en portefeuille (conditionId={cond_id[:12]}...)")
+            logger.info(f"  [SKIP] {str(m.get('question',''))[:50]} "
+                        f"— conditionId déjà en portefeuille ({cond_id[:12]}...)")
             continue
 
-        # Garde 2 : event_id identique (élections multi-candidats où chaque
-        # candidat a son propre conditionId mais ils partagent le même événement).
-        # Empêche : SY sur candidat A + S3/SP sur candidat B du même scrutin.
-        # Si les deux candidats peuvent gagner l'un contre l'autre, on perd
-        # nécessairement sur l'une des deux positions.
+        # Garde 2 : event_id identique (élections multi-candidats)
+        # Règles :
+        #   a) SY bloqué si S3/SP déjà en portefeuille sur le même événement
+        #      → empêche de doubler la mise directionnelle sur une même élection
+        #   b) S3/SP bloqué si SY déjà en portefeuille sur le même événement
+        #      → idem (les deux sont corrélés : tous deux perdent si le favori perd)
+        #   c) S3/SP vs S3/SP sur le même événement : l'un gagne toujours, l'autre perd
+        #   d) SY vs SY : idem
         event_id = str(m.get("_event_id", "")).strip()
-        if event_id and any(
-            str(p.get("event_id", "")) == event_id
-            for p in portfolio["positions_ouvertes"].values()
-        ):
-            logger.debug(f"  [SKIP] {str(m.get('question',''))[:50]} "
-                         f"— événement Gamma déjà en portefeuille (event_id={event_id[:12]}...)")
-            continue
+        if event_id:
+            conflict = next(
+                (p for p in portfolio["positions_ouvertes"].values()
+                 if str(p.get("event_id", "")) == event_id),
+                None
+            )
+            if conflict:
+                logger.info(
+                    f"  [SKIP {strategy}] {str(m.get('question',''))[:50]} "
+                    f"— événement Gamma déjà en portefeuille via {conflict.get('strategy','?')} "
+                    f"sur \"{conflict.get('question','')[:35]}\" (event_id={event_id[:12]}...)"
+                )
+                continue
 
         # Mise = min(5% × capital total, 200$, USDC disponible - 5$ de réserve)
         usdc_utilisable = portfolio["capital_disponible"] - 5.0

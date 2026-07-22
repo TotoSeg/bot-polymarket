@@ -600,17 +600,12 @@ def run_once(dry_run: bool = False):
                 continue
 
         # Mise = min(5% × capital total, 200$, USDC disponible - 5$ de réserve)
+        # Pas de seuil minimum : tout le capital restant est déployé même si
+        # inférieur à la Kelly cible, tant que ≥ 1$ (min CLOB).
         usdc_utilisable = portfolio["capital_disponible"] - 5.0
         kelly_target    = min(capital_kelly * 0.05, max_bet)
         bet = min(kelly_target, usdc_utilisable)
         if bet < 1.0:
-            skipped += 1
-            continue
-        # Sauter si le capital restant ne permet pas 50% de la mise Kelly cible :
-        # une position sous-dimensionnée dégrade l'EV sans valeur stratégique.
-        if bet < kelly_target * 0.5:
-            logger.info(f"  [SKIP capital] usdc_utilisable={usdc_utilisable:.2f}$ < 50% Kelly "
-                        f"({kelly_target:.2f}$) — cycle épuisé, pas d'entrée sous-dimensionnée")
             skipped += 1
             continue
 

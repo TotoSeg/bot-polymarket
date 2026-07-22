@@ -258,8 +258,8 @@ def place_no_order(client: ClobClient, token_id: str,
     amount_usdc = max(round(amount_usdc, 2), 1.0)
 
     if clob_ask_price > 0:
-        # Limite au prix réel du carnet → fill immédiat, pas de slippage
-        no_price   = min(round(clob_ask_price, 4), 0.99)
+        # Limite au prix réel du carnet → fill immédiat si la liquidité est confirmée
+        no_price    = min(round(clob_ask_price, 4), 0.99)
         size_tokens = round(amount_usdc / no_price, 4)
         try:
             resp = client.create_and_post_order(
@@ -271,6 +271,16 @@ def place_no_order(client: ClobClient, token_id: str,
                 ),
                 options = PartialCreateOrderOptions(tick_size="0.01"),
             )
+            # Vérifier le statut de l'ordre : un GTC peut rester en carnet sans fill.
+            # Si le statut est "live" ou "open", l'ordre n'a pas encore rempli.
+            # On l'accepte quand même (le CLOB le remplira dès qu'un ask matche)
+            # mais on logge l'avertissement pour tracer les ordres non-fillés.
+            status = str(resp.get("status", "")).lower() if isinstance(resp, dict) else ""
+            if status in ("live", "open", "unmatched"):
+                logger.warning(
+                    f"  Ordre NO en carnet (non fillé immédiatement, status={status}) : "
+                    f"token={token_id[:15]}... @ NO={no_price:.3f} | {size_tokens:.4f} tokens"
+                )
             filled_usdc = round(size_tokens * no_price, 2)
             resp["_filled_usdc"] = filled_usdc
             logger.success(
@@ -336,6 +346,12 @@ def place_yes_order(client: ClobClient, token_id: str,
                 ),
                 options = PartialCreateOrderOptions(tick_size="0.01"),
             )
+            status = str(resp.get("status", "")).lower() if isinstance(resp, dict) else ""
+            if status in ("live", "open", "unmatched"):
+                logger.warning(
+                    f"  Ordre YES en carnet (non fillé immédiatement, status={status}) : "
+                    f"token={token_id[:15]}... @ YES={exec_price:.3f} | {size_tokens:.4f} tokens"
+                )
             filled_usdc = round(size_tokens * exec_price, 2)
             resp["_filled_usdc"] = filled_usdc
             logger.success(

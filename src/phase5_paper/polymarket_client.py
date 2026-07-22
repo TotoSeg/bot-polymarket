@@ -55,6 +55,9 @@ def get_active_markets(min_volume: float = 500.0, max_pages: int = 30) -> list[d
                 params={"closed": "false", "limit": PAGE_SIZE, "offset": offset},
                 timeout=15,
             )
+            if resp.status_code in (400, 422):
+                logger.debug(f"/markets page {page+1} : fin de pagination (HTTP {resp.status_code})")
+                break
             resp.raise_for_status()
             data = resp.json()
         except requests.RequestException as e:

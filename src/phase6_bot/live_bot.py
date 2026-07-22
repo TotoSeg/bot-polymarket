@@ -286,6 +286,14 @@ def run_once(dry_run: bool = False):
             if not no_token:
                 continue
 
+            # Si NO > 0.99 (YES < 0.01), le CLOB refuse les ordres au-dessus de 0.99.
+            # À ce stade la résolution est imminente — attendre la clôture naturelle.
+            no_price_now = 1.0 - current_yp
+            if no_price_now > 0.99:
+                logger.info(f"  [HOLD NO] {mid[:10]}... – NO={no_price_now:.4f} > 0.99 CLOB max, "
+                            f"résolution naturelle dans quelques heures")
+                continue
+
             # Vérifier la liquidité côté vente.
             # Dès que YES ≤ seuil de clôture anticipée (1%), on force la vente
             # sans vérifier le carnet d'ordres (souvent vide sur marchés en fin de vie).

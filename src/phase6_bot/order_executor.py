@@ -122,11 +122,13 @@ def get_yes_token_id(market: dict) -> Optional[str]:
 
 # ── Vérification de liquidité (achat) ───────────────────────────────────────
 
-def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bool:
+def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> tuple[bool, float]:
     """
     Vérifie que le carnet d'ordres n'est pas vide et que le best ask ≤ 0.99.
-    Seuil abaissé à 50% car on utilise FAK (fill partiel accepté).
-    Rejette si le best ask dépasse 0.99 (prix NO trop élevé → ordre invalide CLOB).
+    Retourne (ok, best_ask) — best_ask est le prix d'exécution à utiliser dans l'ordre.
+
+    Le best_ask du CLOB est le vrai prix de marché, différent du prix Gamma API
+    (mid-price) : il faut utiliser best_ask dans l'ordre pour qu'il soit exécuté.
     """
     try:
         book = client.get_order_book(token_id)
@@ -137,13 +139,13 @@ def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bo
 
         if not asks:
             logger.warning(f"Carnet vide pour token {token_id[:12]}...")
-            return False
+            return False, 0.0
 
         # Vérifier que le best ask ne dépasse pas 0.99 (max CLOB)
         best_ask = min(float(a["price"] if isinstance(a, dict) else a.price) for a in asks)
         if best_ask > 0.99:
-            logger.warning(f"Best ask NO = {best_ask:.4f} > 0.99 (marché trop proche de résolution)")
-            return False
+            logger.warning(f"Best ask = {best_ask:.4f} > 0.99 (marché trop proche de résolution)")
+            return False, 0.0
 
         # Calculer la liquidité disponible côté ask
         total = sum(float(a["size"] if isinstance(a, dict) else a.size) *
@@ -154,11 +156,11 @@ def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> bo
                     f"(best_ask={best_ask:.4f}) pour {amount_usdc:.2f}$ demandés")
         if total < amount_usdc * 0.50:
             logger.warning(f"Liquidité insuffisante : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
-            return False
-        return True
+            return False, 0.0
+        return True, best_ask
     except Exception as e:
         logger.warning(f"Impossible de lire l'order book : {e}")
-        return False  # par prudence, ne pas tenter si on ne peut pas vérifier
+        return False, 0.0  # par prudence, ne pas tenter si on ne peut pas vérifier
 
 
 # ── Vérification de liquidité (vente) ───────────────────────────────────────
@@ -240,16 +242,48 @@ def _extract_filled_usdc(resp: dict, requested_usdc: float) -> float:
 # ── Placement d'ordre achat (CLOB V2) ────────────────────────────────────────
 
 def place_no_order(client: ClobClient, token_id: str,
-                   amount_usdc: float, yes_price: float) -> Optional[dict]:
+                   amount_usdc: float, yes_price: float,
+                   clob_ask_price: float = 0.0) -> Optional[dict]:
     """
-    Achète amount_usdc de tokens NO via CLOB V2 (ordre FAK).
-    FAK = Fill And Kill : remplit ce qui est disponible, annule le reste.
-    Évite les échecs FOK dus à la race condition (order book légèrement décalé).
-    Retourne None si le fill est inférieur à $1 (ordre inutile).
-    """
-    no_price    = min(round(1.0 - yes_price, 4), 0.99)  # CLOB max price = 0.99
-    amount_usdc = max(round(amount_usdc, 2), 1.0)        # CLOB min order = $1
+    Achète amount_usdc de tokens NO via CLOB V2.
 
+    Quand clob_ask_price (best ask du carnet) est fourni, on place un ordre
+    limite GTC au prix exact du marché : fill immédiat garanti si la liquidité
+    est confirmée par check_liquidity. C'est plus fiable que le FAK MarketOrder
+    dont le prix implicite diverge du best ask en marché illiquide.
+
+    Sans clob_ask_price (fallback) : FAK market order sans prix — peut échouer
+    si le CLOB ne calcule pas correctement le prix implicite.
+    """
+    amount_usdc = max(round(amount_usdc, 2), 1.0)
+
+    if clob_ask_price > 0:
+        # Limite au prix réel du carnet → fill immédiat, pas de slippage
+        no_price   = min(round(clob_ask_price, 4), 0.99)
+        size_tokens = round(amount_usdc / no_price, 4)
+        try:
+            resp = client.create_and_post_order(
+                OrderArgs(
+                    token_id = token_id,
+                    price    = float(no_price),
+                    size     = float(size_tokens),
+                    side     = Side.BUY,
+                ),
+                options = PartialCreateOrderOptions(tick_size="0.01"),
+            )
+            filled_usdc = round(size_tokens * no_price, 2)
+            resp["_filled_usdc"] = filled_usdc
+            logger.success(
+                f"  Ordre NO placé : token={token_id[:15]}...  "
+                f"{filled_usdc:.2f}$ ({size_tokens:.4f} tokens @ NO={no_price:.3f}) | resp={resp}"
+            )
+            return resp
+        except Exception as e:
+            logger.error(f"  Ordre NO échoué (token={token_id[:15]}...) : {e}")
+            return None
+
+    # Fallback : FAK market order (moins fiable sans prix explicite)
+    no_price = min(round(1.0 - yes_price, 4), 0.99)
     try:
         resp = client.create_and_post_market_order(
             order_args = MarketOrderArgs(
@@ -261,35 +295,60 @@ def place_no_order(client: ClobClient, token_id: str,
             options    = PartialCreateOrderOptions(tick_size="0.01"),
             order_type = OrderType.FAK,
         )
-
-        # Extraire le montant réellement exécuté depuis la réponse CLOB
         filled_usdc = _extract_filled_usdc(resp, amount_usdc)
         if filled_usdc < 1.0:
             logger.warning(f"  Fill trop faible ({filled_usdc:.2f}$) pour {amount_usdc}$ demandés — ignoré")
             return None
-
         resp["_filled_usdc"] = filled_usdc
         logger.success(
-            f"  Ordre NO placé : token={token_id[:15]}...  "
-            f"{filled_usdc:.2f}$ (demandé {amount_usdc:.2f}$) @ NO={no_price:.3f} | resp={resp}"
+            f"  Ordre NO placé (FAK) : token={token_id[:15]}...  "
+            f"{filled_usdc:.2f}$ (demandé {amount_usdc:.2f}$) @ NO≈{no_price:.3f} | resp={resp}"
         )
         return resp
     except Exception as e:
-        logger.error(f"  Ordre échoué (token={token_id[:15]}...) : {e}")
+        logger.error(f"  Ordre NO échoué (token={token_id[:15]}...) : {e}")
         return None
 
 
 # ── Placement d'ordre achat YES (CLOB V2) ────────────────────────────────────
 
 def place_yes_order(client: ClobClient, token_id: str,
-                    amount_usdc: float, yes_price: float) -> Optional[dict]:
+                    amount_usdc: float, yes_price: float,
+                    clob_ask_price: float = 0.0) -> Optional[dict]:
     """
-    Achète amount_usdc de tokens YES via CLOB V2 (ordre FAK).
+    Achète amount_usdc de tokens YES via CLOB V2.
     Stratégie SY : YES 94-98%, résolution ≤ 96h, on parie que l'événement arrive.
+
+    Même logique que place_no_order : limit order au best_ask quand disponible.
     """
-    yes_price   = min(round(yes_price, 4), 0.99)
     amount_usdc = max(round(amount_usdc, 2), 1.0)
 
+    if clob_ask_price > 0:
+        exec_price  = min(round(clob_ask_price, 4), 0.99)
+        size_tokens = round(amount_usdc / exec_price, 4)
+        try:
+            resp = client.create_and_post_order(
+                OrderArgs(
+                    token_id = token_id,
+                    price    = float(exec_price),
+                    size     = float(size_tokens),
+                    side     = Side.BUY,
+                ),
+                options = PartialCreateOrderOptions(tick_size="0.01"),
+            )
+            filled_usdc = round(size_tokens * exec_price, 2)
+            resp["_filled_usdc"] = filled_usdc
+            logger.success(
+                f"  Ordre YES placé : token={token_id[:15]}...  "
+                f"{filled_usdc:.2f}$ ({size_tokens:.4f} tokens @ YES={exec_price:.3f}) | resp={resp}"
+            )
+            return resp
+        except Exception as e:
+            logger.error(f"  Ordre YES échoué (token={token_id[:15]}...) : {e}")
+            return None
+
+    # Fallback FAK market order
+    exec_price = min(round(yes_price, 4), 0.99)
     try:
         resp = client.create_and_post_market_order(
             order_args = MarketOrderArgs(
@@ -307,8 +366,8 @@ def place_yes_order(client: ClobClient, token_id: str,
             return None
         resp["_filled_usdc"] = filled_usdc
         logger.success(
-            f"  Ordre YES placé : token={token_id[:15]}...  "
-            f"{filled_usdc:.2f}$ (demandé {amount_usdc:.2f}$) @ YES={yes_price:.3f} | resp={resp}"
+            f"  Ordre YES placé (FAK) : token={token_id[:15]}...  "
+            f"{filled_usdc:.2f}$ (demandé {amount_usdc:.2f}$) @ YES≈{exec_price:.3f} | resp={resp}"
         )
         return resp
     except Exception as e:

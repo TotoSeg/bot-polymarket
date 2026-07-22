@@ -630,10 +630,13 @@ def run_once(dry_run: bool = False):
                 portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
             nb_new += 1
         else:
-            if not check_liquidity(client, token, bet):
+            liq_ok, best_ask = check_liquidity(client, token, bet)
+            if not liq_ok:
                 skipped += 1
                 continue
-            resp = place_yes_order(client, token, bet, yp) if is_sy else place_no_order(client, token, bet, yp)
+            resp = (place_yes_order(client, token, bet, yp, clob_ask_price=best_ask)
+                    if is_sy else
+                    place_no_order(client, token, bet, yp, clob_ask_price=best_ask))
             if resp:
                 actual_bet = resp.get("_filled_usdc", bet)
                 m["_order_id"] = resp.get("orderID", "")

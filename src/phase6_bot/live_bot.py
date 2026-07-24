@@ -652,18 +652,23 @@ def run_once(dry_run: bool = False):
                             f"{str(m.get('question',''))[:45]:45s} | "
                             f"YES={yp:.3f} | EV={ev*100:.1f}% | Mise={actual_bet:.2f}$ | dir={direction}")
 
-                # Ordre GTC immédiat : vendre automatiquement quand NO atteint 99¢ (ou YES 99¢).
-                # Set-and-forget : le CLOB Polymarket l'exécute sans que le bot n'ait à tourner.
+                # Ordre GTC immédiat : vendre automatiquement quand le token atteint 99¢.
+                # Set-and-forget : le CLOB l'exécute dès que le prix monte, libère le capital
+                # sans attendre la résolution (qui peut prendre 1-48h de plus).
+                # Utilise les tokens réels de l'ordre d'achat (_size_tokens) pour ne pas
+                # vendre plus qu'on possède (bug si on utilisait 1-yp au lieu du prix CLOB).
                 time.sleep(0.2)
+                tokens_gtc = resp.get("_size_tokens") or 0
                 if is_sy:
                     # SY : vendre tokens YES quand YES = 99¢
-                    tokens_gtc = actual_bet / yp if yp > 0 else 0
+                    if tokens_gtc <= 0:
+                        tokens_gtc = actual_bet / yp if yp > 0 else 0
                     if tokens_gtc > 0.01:
                         place_gtc_sell_yes(client, token, tokens_gtc, limit_price=0.99)
                 else:
                     # S3/SP : vendre tokens NO quand NO = 99¢ (= YES ≤ 1¢)
-                    no_price_entry = 1.0 - yp
-                    tokens_gtc = actual_bet / no_price_entry if no_price_entry > 0 else 0
+                    if tokens_gtc <= 0:
+                        tokens_gtc = actual_bet / max(1.0 - yp, 0.001)
                     if tokens_gtc > 0.01:
                         place_gtc_sell_no(client, token, tokens_gtc, limit_price=0.99)
             else:

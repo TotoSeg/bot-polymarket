@@ -282,7 +282,9 @@ def place_no_order(client: ClobClient, token_id: str,
                     f"token={token_id[:15]}... @ NO={no_price:.3f} | {size_tokens:.4f} tokens"
                 )
             filled_usdc = round(size_tokens * no_price, 2)
-            resp["_filled_usdc"] = filled_usdc
+            resp["_filled_usdc"]  = filled_usdc
+            resp["_size_tokens"]  = size_tokens   # tokens réels achetés → pour le GTC vente
+            resp["_exec_price"]   = no_price
             logger.success(
                 f"  Ordre NO placé : token={token_id[:15]}...  "
                 f"{filled_usdc:.2f}$ ({size_tokens:.4f} tokens @ NO={no_price:.3f}) | resp={resp}"
@@ -354,6 +356,8 @@ def place_yes_order(client: ClobClient, token_id: str,
                 )
             filled_usdc = round(size_tokens * exec_price, 2)
             resp["_filled_usdc"] = filled_usdc
+            resp["_size_tokens"] = size_tokens
+            resp["_exec_price"]  = exec_price
             logger.success(
                 f"  Ordre YES placé : token={token_id[:15]}...  "
                 f"{filled_usdc:.2f}$ ({size_tokens:.4f} tokens @ YES={exec_price:.3f}) | resp={resp}"

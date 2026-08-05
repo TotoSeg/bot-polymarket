@@ -109,25 +109,34 @@ def _s3_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dic
 
 # ── SP ────────────────────────────────────────────────────────────────────────
 
-def _sp_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dict]:
+def _sp_signal(market: dict, yes_price: float, question_lc: str,
+               is_neg_risk: bool = False) -> Optional[dict]:
     """
-    SP : marchés politiques/géopolitiques, YES 10-25% (NO 75-90%).
-    Backtest 2024-25 : WR 92.2-99.2%.
+    SP : YES 10-25% (NO 75-90%).
+    - Marchés politiques/géopolitiques : WR backtest 92.2-99.2%
+    - Marchés negRisk (brackets mutuellement exclusifs) : même structure d'edge
+      (1 seul bracket résout YES, tous les autres NO → taux de réussite élevé).
+      Prior légèrement réduit vs marchés politiques (pas de backtest historique).
     """
     if not (0.10 <= yes_price <= 0.25):
         return None
 
     if yes_price < 0.20:
-        prior = 0.992; score = 7.0; tier = "10-20%->99.2%"
+        prior = 0.985 if is_neg_risk else 0.992
+        score = 6.5  if is_neg_risk else 7.0
+        tier  = "10-20%->98.5%(neg-risk)" if is_neg_risk else "10-20%->99.2%"
     else:
-        prior = 0.922; score = 6.0; tier = "20-25%->92.2%"
+        prior = 0.900 if is_neg_risk else 0.922
+        score = 5.5  if is_neg_risk else 6.0
+        tier  = "20-25%->90%(neg-risk)" if is_neg_risk else "20-25%->92.2%"
 
-    # Bonus catégorie
     cat = _category(question_lc)
     if cat == "politics_us":
         score += 1.5; tier += ",pol_US"
     elif cat == "politics_world":
         score += 1.0; tier += ",pol_WO"
+    elif cat == "tech" and is_neg_risk:
+        score += 0.5; tier += ",tech_neg-risk"
 
     volume = float(market.get("volume", 0) or 0)
     if volume >= 20_000: score += 1.0
@@ -138,7 +147,7 @@ def _sp_signal(market: dict, yes_price: float, question_lc: str) -> Optional[dic
     return {
         "strategy":       "SP",
         "win_rate_prior": prior,
-        "reason":         f"YES={yes_price:.3f}, pol/geo, {tier}",
+        "reason":         f"YES={yes_price:.3f}, {tier}",
         "score":          score,
     }
 
@@ -149,12 +158,13 @@ def check_signals(market: dict, yes_price: float) -> list[dict]:
     """
     Analyse un marché live et retourne les signaux déclenchés (S3 et/ou SP).
 
-    Un marché politique YES=7% déclenche les deux simultanément.
-    Le bot priorise par score décroissant quand le capital est limité.
+    SP s'applique aux marchés politiques ET aux marchés negRisk (brackets) :
+    même edge structurel — au plus un bracket résout YES, tous les autres NON.
     """
     signals = []
     question = str(market.get("question", ""))
     question_lc = question.lower()
+    is_neg_risk = bool(market.get("_event_id") or market.get("negRisk"))
 
     if _is_crypto(question_lc):
         return []
@@ -163,8 +173,8 @@ def check_signals(market: dict, yes_price: float) -> list[dict]:
     if sig_s3:
         signals.append(sig_s3)
 
-    if _is_political(question_lc):
-        sig_sp = _sp_signal(market, yes_price, question_lc)
+    if _is_political(question_lc) or is_neg_risk:
+        sig_sp = _sp_signal(market, yes_price, question_lc, is_neg_risk=is_neg_risk)
         if sig_sp:
             signals.append(sig_sp)
 

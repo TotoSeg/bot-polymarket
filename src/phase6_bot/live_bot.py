@@ -576,27 +576,27 @@ def run_once(dry_run: bool = False):
                         f"— conditionId déjà en portefeuille ({cond_id[:12]}...)")
             continue
 
-        # Garde 2 : event_id identique (élections multi-candidats)
-        # Règles :
-        #   a) SY bloqué si S3/SP déjà en portefeuille sur le même événement
-        #      → empêche de doubler la mise directionnelle sur une même élection
-        #   b) S3/SP bloqué si SY déjà en portefeuille sur le même événement
-        #      → idem (les deux sont corrélés : tous deux perdent si le favori perd)
-        #   c) S3/SP vs S3/SP sur le même événement : l'un gagne toujours, l'autre perd
-        #   d) SY vs SY : idem
+        # Garde 2 : event_id identique
+        # negRisk (brackets mutuellement exclusifs) : autoriser plusieurs positions NO
+        # sur des brackets différents — au pire 1 perd, les autres gagnent tous.
+        # Bloquer uniquement si direction opposée (SY↔S3/SP) ou event non-negRisk.
         event_id = str(m.get("_event_id", "")).strip()
         if event_id:
-            conflict = next(
-                (p for p in portfolio["positions_ouvertes"].values()
-                 if str(p.get("event_id", "")) == event_id),
-                None
-            )
-            if conflict:
-                logger.info(
-                    f"  [SKIP {strategy}] {str(m.get('question',''))[:50]} "
-                    f"— événement Gamma déjà en portefeuille via {conflict.get('strategy','?')} "
-                    f"sur \"{conflict.get('question','')[:35]}\" (event_id={event_id[:12]}...)"
-                )
+            new_dir = "YES" if is_sy else "NO"
+            skip_event = False
+            for p in portfolio["positions_ouvertes"].values():
+                if str(p.get("event_id", "")) != event_id:
+                    continue
+                opp_dir = p.get("direction", "") != new_dir
+                if opp_dir or not is_neg_risk:
+                    logger.info(
+                        f"  [SKIP {strategy}] {str(m.get('question',''))[:50]} "
+                        f"— event {event_id[:12]}... déjà {p.get('strategy','?')}/{p.get('direction','')} "
+                        f"sur \"{p.get('question','')[:35]}\""
+                    )
+                    skip_event = True
+                    break
+            if skip_event:
                 continue
 
         # Mise = min(5% × capital total, 200$, USDC disponible - 5$ de réserve)

@@ -1,0 +1,59 @@
+polymarket-bot/
+│
+├── CLAUDE.md                  ← Instructions pour Claude Code
+├── ARCHITECTURE.md            ← Ce document
+├── README.md
+├── requirements.txt
+│
+├── .claude/
+│   └── settings.json          ← Permissions auto-approve
+│
+├── data/                      ← Données brutes (gitignorées, trop lourdes)
+│   ├── markets.parquet
+│   ├── quant.parquet
+│   └── users.parquet
+│
+├── notebooks/                 ← Exploration interactive (Jupyter)
+│   ├── 01_audit.ipynb
+│   ├── 02_eda.ipynb
+│   └── 03_edge_discovery.ipynb
+│
+├── src/                       ← Code source principal
+│   ├── ingestion/
+│   │   ├── audit.py           ← Phase 1 : audit des données
+│   │   └── loader.py          ← Fonctions DuckDB réutilisables
+│   │
+│   ├── eda/
+│   │   ├── market_stats.py    ← Phase 2 : stats par marché
+│   │   ├── calibration.py     ← Est-ce que 70% = 70% ?
+│   │   └── category_analysis.py
+│   │
+│   ├── strategy/
+│   │   ├── edge_detector.py   ← Phase 3 : détection des biais
+│   │   ├── signals.py         ← Définition des signaux d'entrée
+│   │   └── hypotheses.py      ← Catalogue des stratégies candidates
+│   │
+│   ├── backtest/
+│   │   ├── engine.py          ← Phase 4 : moteur de backtest
+│   │   ├── metrics.py         ← Win rate, EV, Sharpe, drawdown
+│   │   └── optimizer.py       ← Grid search des paramètres
+│   │
+│   ├── paper_trading/
+│   │   ├── simulator.py       ← Phase 5 : simulation live
+│   │   └── tracker.py         ← Suivi des trades virtuels
+│   │
+│   └── bot/
+│       ├── api_client.py      ← Phase 6 : connexion Polymarket CLOB
+│       ├── signal_engine.py   ← Calcul du signal en temps réel
+│       ├── order_manager.py   ← Placement et suivi des ordres
+│       ├── risk_manager.py    ← Stop-loss, position sizing
+│       └── main.py            ← Point d'entrée du bot
+│
+├── outputs/                   ← Résultats d'analyses, graphiques
+│   ├── eda/
+│   ├── backtest/
+│   └── paper_trading/
+│
+├── logs/                      ← Logs d'exécution
+│
+└── tests/                     ← Tests unitaires

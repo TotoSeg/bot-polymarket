@@ -1,141 +1,97 @@
-"""
-Mean-reversion deja pricee a l'ouverture du marche suivant ?
-=============================================================
-Pour chaque paire de fenetres consecutives :
-  - Direction bougie N (up/down) depuis btc_5m_candles.parquet
-  - Prix d'ouverture du marche N+1 dans ticks_5m.parquet
-    (premier tick du marche = proxy du prix a l'ouverture)
-
-Si le biais mean-reversion est deja prise en compte par les market makers,
-on devrait voir : apres bougie UP, 'Down' s'ouvre > 50c (deja sur-price).
-Si non, 'Down' s'ouvre a ~50c et il y a de l'edge.
-"""
-
-import sys
-import duckdb
-import pandas as pd
-import numpy as np
-
+﻿import sys, pandas as pd, numpy as np, duckdb
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 conn = duckdb.connect()
 
 print("=" * 60)
-print("MEAN-REVERSION : DEJA PRICEE A L'OUVERTURE ?")
+print("MEAN-REVERSION : DEJA PRICEE A L OUVERTURE ?")
 print("=" * 60)
 
-# Prix d'ouverture = premier tick de chaque marche (timestamp_ms min)
-# Direction bougie precedente = depuis btc_5m_candles (open_time = start_ts du marche)
-# On joint via start_ts : chaque marche 5m correspond a une bougie 5m BTC
-
-print("\nChargement des donnees...")
-
-# Prix d'ouverture par marche (premier tick)
+# Prix d'ouverture = premier tick par marche
 df_open = conn.execute("""
-    SELECT
-        t.market_id,
-        t.crypto,
-        t.outcome,
-        MIN(t.timestamp_ms) AS first_tick_ms,
+    SELECT t.market_id, t.outcome,
         FIRST(t.price ORDER BY t.timestamp_ms ASC) AS open_price
     FROM read_parquet('data/updown/ticks_5m.parquet') t
     INNER JOIN read_parquet('data/updown/markets_5m.parquet') m
         ON t.market_id = m.market_id
-    WHERE t.timestamp_ms > 0
-      AND m.resolution IN (0, 1)
-    GROUP BY t.market_id, t.crypto, t.outcome
+    WHERE t.timestamp_ms > 0 AND m.resolution IN (0,1)
+    GROUP BY t.market_id, t.outcome
 """).df()
 
-print(f"  Prix ouverture : {len(df_open):,} lignes ({df_open['market_id'].nunique():,} marches)")
-
-# Metadata marches avec start_ts et resolution
-df_markets = conn.execute("""
-    SELECT market_id, start_ts, end_ts, resolution, crypto
+df_mkts = conn.execute("""
+    SELECT market_id, end_ts, resolution
     FROM read_parquet('data/updown/markets_5m.parquet')
-    WHERE resolution IN (0, 1)
+    WHERE resolution IN (0,1)
 """).df()
 
-# Bougies BTC 5m (open_time en UTC, on convertit en epoch secondes)
-df_candles = pd.read_parquet("data/updown/btc_5m_candles.parquet")
-df_candles["open_ts"] = df_candles["open_time"].astype("int64") // 10**9
-df_candles["dir"] = (df_candles["close"] > df_candles["open"]).astype(int)
-df_candles["ret_pct"] = (df_candles["close"] - df_candles["open"]) / df_candles["open"] * 100
+# Candles BTC : open_time stockee en ms dans parquet -> convertir en secondes
+df_c = pd.read_parquet("data/updown/btc_5m_candles.parquet")
+# open_time est datetime64[ms, UTC] -> astype int64 donne des ms depuis epoch
+df_c["open_ts"] = df_c["open_time"].astype("int64") // 1000  # ms -> secondes
+df_c["dir"] = (df_c["close"] > df_c["open"]).astype(int)
+df_c["ret_pct"] = (df_c["close"] - df_c["open"]) / df_c["open"] * 100
+df_c = df_c.drop_duplicates(subset=["open_ts"], keep="last")
+candle_idx = df_c.set_index("open_ts")
 
-print(f"  Bougies BTC : {len(df_candles):,}")
+# Fenetre du marche : end_ts est aligne 5min. Bougie precedente : ouverte a end_ts - 600
+# (la fenetre du marche est end_ts-300 -> end_ts, donc bougie precedente = end_ts-600)
+df_mkts["prev_candle_ts"] = df_mkts["end_ts"].astype(int) - 600
+df_mkts["prev_dir"] = df_mkts["prev_candle_ts"].map(candle_idx["dir"])
+df_mkts["prev_ret"]  = df_mkts["prev_candle_ts"].map(candle_idx["ret_pct"])
+df_mkts = df_mkts.dropna(subset=["prev_dir"])
+df_mkts["prev_dir"] = df_mkts["prev_dir"].astype(int)
 
-# Jointure : marche -> bougie precedente via start_ts
-# start_ts du marche N+1 = end_ts du marche N = open_time de la bougie N
-df_mkt = df_markets.copy()
-df_mkt["prev_candle_ts"] = df_mkt["start_ts"]  # debut du marche = debut de la bougie contemporaine
+print(f"Marches avec bougie precedente connue : {len(df_mkts):,}")
 
-# Associer la bougie precedente (celle qui se terminait au start_ts du marche)
-# La bougie qui finit a T = ouverte a T-300s
-df_mkt["prev_open_ts"] = df_mkt["start_ts"] - 300
+# Jointure avec prix ouverture 'Down'
+df_down = df_open[df_open["outcome"] == "Down"][["market_id","open_price"]]
+df_up   = df_open[df_open["outcome"] == "Up"][["market_id","open_price"]].rename(
+    columns={"open_price":"open_price_up"})
+df = df_mkts.merge(df_down, on="market_id").merge(df_up, on="market_id", how="left")
 
-candle_lookup = df_candles.set_index("open_ts")[["dir", "ret_pct"]]
-df_mkt["prev_dir"] = df_mkt["prev_open_ts"].map(candle_lookup["dir"])
-df_mkt["prev_ret"]  = df_mkt["prev_open_ts"].map(candle_lookup["ret_pct"])
+print(f"Paires analysables : {len(df):,}")
+if len(df) == 0:
+    # debug : afficher quelques valeurs
+    print("DEBUG end_ts sample:", df_mkts["end_ts"].head(3).tolist())
+    print("DEBUG prev_candle_ts sample:", df_mkts["prev_candle_ts"].head(3).tolist())
+    print("DEBUG candle open_ts sample:", df_c["open_ts"].head(3).tolist())
+    print("DEBUG end_ts % 300 sample:", (df_mkts["end_ts"] % 300).head(3).tolist())
+    print("DEBUG open_ts % 300 sample:", (df_c["open_ts"] % 300).head(3).tolist())
+    exit()
 
-df_mkt = df_mkt.dropna(subset=["prev_dir"])
-print(f"  Marches avec bougie precedente connue : {len(df_mkt):,}")
-
-# Jointure avec prix d'ouverture
-# On prend seulement le Down token (outcome='Down') pour voir si il est sur/sous-price
-df_open_down = df_open[df_open["outcome"] == "Down"][["market_id", "open_price"]].copy()
-df_open_up   = df_open[df_open["outcome"] == "Up"][["market_id", "open_price"]].rename(
-    columns={"open_price": "open_price_up"})
-
-df_joined = df_mkt.merge(df_open_down, on="market_id", how="inner")
-df_joined = df_joined.merge(df_open_up, on="market_id", how="left")
-df_joined["prev_dir"] = df_joined["prev_dir"].astype(int)
-
-print(f"  Paires analysables : {len(df_joined):,}")
-
-# ── Analyse principale ───────────────────────────────────────────────────────
-print("\n" + "=" * 60)
-print("1. PRIX D'OUVERTURE 'DOWN' SELON DIRECTION BOUGIE PRECEDENTE")
+print()
 print("=" * 60)
-print("(Si mean-reversion pricee : apres UP, Down s'ouvre > 50c)\n")
-
-g = df_joined.groupby("prev_dir")["open_price"].agg(["mean", "median", "std", "count"])
-g.index = ["prev=Down", "prev=Up"]
-g.columns = ["avg_open_down", "median", "std", "n"]
-g["avg_open_down"] = (g["avg_open_down"] * 100).round(3)
-g["median"] = (g["median"] * 100).round(3)
-print(g.to_string())
-
-avg_after_up   = df_joined[df_joined["prev_dir"]==1]["open_price"].mean()
-avg_after_down = df_joined[df_joined["prev_dir"]==0]["open_price"].mean()
-print(f"\n  Prix moyen 'Down' apres bougie UP   : {avg_after_up*100:.3f}c")
-print(f"  Prix moyen 'Down' apres bougie DOWN : {avg_after_down*100:.3f}c")
-print(f"  Difference                          : {(avg_after_up-avg_after_down)*100:+.3f}pp")
-
-# ── Par magnitude ────────────────────────────────────────────────────────────
-print("\n" + "=" * 60)
-print("2. PRIX OUVERTURE 'DOWN' SELON MAGNITUDE BOUGIE PRECEDENTE")
+print("1. PRIX OUVERTURE 'DOWN' SELON DIRECTION BOUGIE PRECEDENTE")
 print("=" * 60)
-print(f"{'Magnitude':>14} | {'Apres UP (Down price)':>22} | {'Apres DOWN (Down price)':>24} | {'diff':>8} | edge?")
+print("(Si mean-rev pricee : apres UP, Down s ouvre > 50c)\n")
+
+for d, lbl in [(1,"prev=Up"), (0,"prev=Down")]:
+    sub = df[df["prev_dir"]==d]["open_price"]
+    print(f"  {lbl} | n={len(sub):,} | avg={sub.mean()*100:.3f}c | median={sub.median()*100:.3f}c")
+
+diff = (df[df["prev_dir"]==1]["open_price"].mean() - df[df["prev_dir"]==0]["open_price"].mean()) * 100
+print(f"\n  Difference apres UP vs DOWN : {diff:+.3f}pp")
+print("  => Si > 0 : le marche anticipe deja la mean-reversion (Down plus cher apres UP)")
+print("  => Si ~ 0 : edge non price -> strategie viable")
+
+print()
+print("=" * 60)
+print("2. PAR MAGNITUDE BOUGIE PRECEDENTE")
+print("=" * 60)
 
 bins   = [0, 0.05, 0.15, 0.30, 0.60, np.inf]
-labels = ["<0.05%", "0.05-0.15%", "0.15-0.30%", "0.30-0.60%", ">0.60%"]
-df_joined["mag"] = pd.cut(df_joined["prev_ret"].abs(), bins=bins, labels=labels)
+labels = ["<0.05%","0.05-0.15%","0.15-0.30%","0.30-0.60%",">0.60%"]
+wr_exp = {"<0.05%":0.497,"0.05-0.15%":0.517,"0.15-0.30%":0.533,"0.30-0.60%":0.542,">0.60%":0.542}
+df["mag"] = pd.cut(df["prev_ret"].abs(), bins=bins, labels=labels)
 
+print(f"{'Magnitude':>14} | {'Down apres UP':>14} | {'Down apres DOWN':>16} | {'diff':>8} | EV si achat Down apres UP")
 for lbl in labels:
-    sub = df_joined[df_joined["mag"] == lbl]
-    if len(sub) < 50:
-        continue
-    pu = sub[sub["prev_dir"]==1]["open_price"].mean()
+    sub = df[df["mag"]==lbl]
+    if len(sub) < 20: continue
+    pu  = sub[sub["prev_dir"]==1]["open_price"].mean()
     pd_ = sub[sub["prev_dir"]==0]["open_price"].mean()
-    diff = (pu - pd_) * 100
-    # Edge = prix Down apres UP vs win_rate attendu
-    # WR attendu apres UP (mean-rev) selon candle analysis :
-    # <0.05%: ~50%, 0.05-0.15%: ~51.7%, 0.15-0.30%: ~53.3%, 0.30-0.60%: ~54.2%, >0.60%: ~54.2%
-    wr_expected = {"<0.05%": 0.497, "0.05-0.15%": 0.517, "0.15-0.30%": 0.533,
-                   "0.30-0.60%": 0.542, ">0.60%": 0.542}.get(lbl, 0.5)
-    ev = wr_expected * (1-pu)/pu * 0.98 - (1-wr_expected) if pu > 0 else 0
-    edge = f"EV={ev*100:+.1f}%" if abs(ev) > 0.005 else "~neutre"
-    print(f"{lbl:>14} | {pu*100:>21.3f}c | {pd_*100:>23.3f}c | {diff:>+7.2f}pp | {edge}")
-
-print("\n=> Si 'Down' apres gros UP s'ouvre proche de 50c → edge non price → strategie viable")
-print("=> Si 'Down' apres gros UP s'ouvre deja a 54c+ → edge deja integre → pas d'edge restant")
+    if np.isnan(pu) or np.isnan(pd_): continue
+    wr  = wr_exp[lbl]
+    ev  = wr*(1-pu)/pu*0.98 - (1-wr) if pu>0 else 0
+    print(f"{lbl:>14} | {pu*100:>13.3f}c | {pd_*100:>15.3f}c | {(pu-pd_)*100:>+7.3f}pp | EV={ev*100:+.2f}%")

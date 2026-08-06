@@ -1,4 +1,0 @@
-edge,description,win_rate_pct,nb_opportunites_mois,volume_min_usd,implementation,risque
-#1 Biais NO Global,Parier NO a l'aveugle sur tout marche binaire ferme,65.2,5000,1000,Facile,Moyen
-#2a Nothing Ever Happens (<=5%),Parier NO quand YES < 5% sur marche non-crypto,99.9,6346,1000,Tres facile,Faible
-#2b Nothing Ever Happens (5-10%),Parier NO quand YES entre 5-10% sur marche non-crypto,97.1,84,1000,Tres facile,Faible

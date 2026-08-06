@@ -51,6 +51,7 @@ from src.phase6_bot.order_executor import (
     get_all_clob_positions, get_total_portfolio_value,
 )
 from src.phase6_bot.notion_reporter import update_notion_report
+from src.phase6_bot.strategy_sx import get_sx_candidates
 from src.polymarket_common.client import build_directional_client, create_api_keys
 
 PROJECT_ROOT   = Path(__file__).resolve().parents[2]
@@ -68,6 +69,7 @@ MIN_EXPECTED_GAIN_PCT = 0.05   # 5%
 MAX_DAYS_S3 = 10   # S3 : résolution ≤ 10 jours
 MAX_DAYS_SP = 10   # SP : résolution ≤ 10 jours
 MAX_DAYS_TO_RESOLUTION = max(MAX_DAYS_S3, MAX_DAYS_SP)  # filtre global = 10j
+MAX_DAYS_SX = 2        # SX : résolution ≤ 48h (fenêtre tweet)
 
 # Seuil de certitude pour clôture anticipée (règle 2) : YES ≤ 1% = NO gagne à 99%
 EARLY_CLOSE_YES_THRESHOLD = 0.01
@@ -553,6 +555,88 @@ def run_once(dry_run: bool = False):
     # les vrais candidats lors du cycle suivant.
     _portfolio_snapshot = copy.deepcopy(portfolio) if dry_run else None
 
+    # ── 5a. Stratégie SX (priorité 1) ────────────────────────────────────────
+    # Traité AVANT S3/SP/SY : tweet markets se ferment dans ≤48h, edge très fort.
+    # Chaque candidat arrive déjà trié + kelly_mult = 1/√rank assigné par get_sx_candidates.
+    try:
+        sx_candidates = get_sx_candidates(portfolio)
+    except Exception as _sx_err:
+        logger.warning(f"[SX] Erreur lors du scan : {_sx_err}")
+        sx_candidates = []
+
+    open_market_ids = {p["market_id"] for p in portfolio["positions_ouvertes"].values()}
+
+    for sx_sig in sx_candidates:
+        sx_m      = sx_sig["market"]
+        sx_mid    = str(sx_m.get("id", ""))
+        sx_yp     = sx_sig["yes_price"]
+        sx_ev     = sx_sig["ev"]
+        sx_end_dt = sx_sig.get("end_dt")
+        sx_mult   = sx_sig.get("kelly_mult", 1.0)
+
+        logger.info(f"  → SX | YES={sx_yp:.3f} | "
+                    f"end={sx_end_dt.strftime('%m-%d %H:%M') if sx_end_dt else '?'} | "
+                    f"{str(sx_m.get('question',''))[:50]}")
+
+        if sx_mid in open_market_ids:
+            logger.info(f"  [SKIP] SX {sx_mid[:10]}... — déjà en portefeuille")
+            continue
+
+        usdc_utilisable = portfolio["capital_disponible"] - 5.0
+        kelly_target    = min(capital_kelly * 0.05 * sx_mult, max_bet)
+        bet = min(kelly_target, usdc_utilisable)
+        if bet < 1.0:
+            skipped += 1
+            continue
+
+        sx_end_str = sx_end_dt.strftime("%Y-%m-%d %H:%M") if sx_end_dt else "???"
+        token      = get_no_token_id(sx_m)
+        if token is None:
+            logger.debug(f"  [SX] Pas de token NO pour {sx_mid[:10]}... — skipped")
+            skipped += 1
+            continue
+
+        if dry_run:
+            logger.info(f"  [DRY-RUN] SX  | {sx_end_str} | "
+                        f"{str(sx_m.get('question',''))[:45]:45s} | "
+                        f"YES={sx_yp:.3f} | EV={sx_ev*100:.1f}% | "
+                        f"Mise={bet:.2f}$ | Kelly×{sx_mult:.2f}")
+            add_position(portfolio, sx_m, "SX", sx_sig["win_rate_prior"], sx_yp,
+                         sx_sig["reason"], bet_amount=bet, direction="NO")
+            if sx_mid in portfolio["positions_ouvertes"] and sx_end_dt and sx_end_dt.year != 9999:
+                portfolio["positions_ouvertes"][sx_mid]["resolution_date"] = sx_end_dt.strftime("%Y-%m-%d")
+            open_market_ids.add(sx_mid)
+            nb_new += 1
+        else:
+            liq_ok, best_ask = check_liquidity(client, token, bet)
+            if not liq_ok:
+                skipped += 1
+                continue
+            resp = place_no_order(client, token, bet, sx_yp, clob_ask_price=best_ask)
+            if resp:
+                actual_bet = resp.get("_filled_usdc", bet)
+                sx_m["_order_id"] = resp.get("orderID", "")
+                add_position(portfolio, sx_m, "SX", sx_sig["win_rate_prior"], sx_yp,
+                             sx_sig["reason"], bet_amount=actual_bet, direction="NO")
+                if sx_mid in portfolio["positions_ouvertes"] and sx_end_dt and sx_end_dt.year != 9999:
+                    portfolio["positions_ouvertes"][sx_mid]["resolution_date"] = sx_end_dt.strftime("%Y-%m-%d")
+                open_market_ids.add(sx_mid)
+                nb_new += 1
+                logger.info(f"  [ENTREE] SX  | {sx_end_str} | "
+                            f"{str(sx_m.get('question',''))[:45]:45s} | "
+                            f"YES={sx_yp:.3f} | EV={sx_ev*100:.1f}% | "
+                            f"Mise={actual_bet:.2f}$ | Kelly×{sx_mult:.2f}")
+                time.sleep(0.2)
+                tokens_gtc = resp.get("_size_tokens") or 0
+                if tokens_gtc <= 0:
+                    tokens_gtc = actual_bet / max(1.0 - sx_yp, 0.001)
+                if tokens_gtc > 0.01:
+                    place_gtc_sell_no(client, token, tokens_gtc, limit_price=0.99)
+            else:
+                skipped += 1
+            time.sleep(0.3)
+
+    # ── 5b. Stratégies S3 / SP / SY ──────────────────────────────────────────
     for _cat_prio, _strategy_prio, end_dt, _neg_score, m, sig, yp, ev in candidates:
         mid      = str(m.get("id", ""))
         strategy = sig["strategy"]

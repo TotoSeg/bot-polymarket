@@ -608,10 +608,26 @@ def run_once(dry_run: bool = False):
             open_market_ids.add(sx_mid)
             nb_new += 1
         else:
-            liq_ok, best_ask = check_liquidity(client, token, bet)
+            # SX : seuil de liquidité réduit (10%) car l'EV est fort (zscore > 2.5).
+            # La mise est ajustée à la profondeur disponible si < target.
+            # On accepte jusqu'à best_ask ≤ 0.99 : même à 0.98, le gain NO reste positif.
+            liq_ok, best_ask, sx_available = check_liquidity(
+                client, token, bet, min_depth_ratio=0.10)
             if not liq_ok:
-                skipped += 1
-                continue
+                if sx_available >= 1.0:
+                    # Profondeur insuffisante pour le ratio mais pas nulle : bet réduit
+                    bet = round(sx_available * 0.90, 2)
+                    logger.info(f"  [SX] Liquidité faible — mise réduite à {bet:.2f}$")
+                    best_ask = best_ask or 0.0
+                    if best_ask <= 0 or bet < 1.0:
+                        skipped += 1
+                        continue
+                else:
+                    skipped += 1
+                    continue
+            elif sx_available < bet:
+                # Assez de liquidité (ratio ok) mais moins que le target : on s'adapte
+                bet = round(min(bet, sx_available * 0.90), 2)
             resp = place_no_order(client, token, bet, sx_yp, clob_ask_price=best_ask)
             if resp:
                 actual_bet = resp.get("_filled_usdc", bet)
@@ -717,7 +733,7 @@ def run_once(dry_run: bool = False):
                 portfolio["positions_ouvertes"][mid]["resolution_date"] = end_dt.strftime("%Y-%m-%d")
             nb_new += 1
         else:
-            liq_ok, best_ask = check_liquidity(client, token, bet)
+            liq_ok, best_ask, _ = check_liquidity(client, token, bet)
             if not liq_ok:
                 skipped += 1
                 continue

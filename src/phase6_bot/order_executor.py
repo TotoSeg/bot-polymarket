@@ -122,13 +122,19 @@ def get_yes_token_id(market: dict) -> Optional[str]:
 
 # ── Vérification de liquidité (achat) ───────────────────────────────────────
 
-def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> tuple[bool, float]:
+def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float,
+                    min_depth_ratio: float = 0.50) -> tuple[bool, float, float]:
     """
     Vérifie que le carnet d'ordres n'est pas vide et que le best ask ≤ 0.99.
-    Retourne (ok, best_ask) — best_ask est le prix d'exécution à utiliser dans l'ordre.
+    Retourne (ok, best_ask, available_usdc).
 
-    Le best_ask du CLOB est le vrai prix de marché, différent du prix Gamma API
-    (mid-price) : il faut utiliser best_ask dans l'ordre pour qu'il soit exécuté.
+    available_usdc : profondeur totale en USDC côté ask — permet à l'appelant
+    de réduire la mise si la liquidité est inférieure au target.
+
+    min_depth_ratio : fraction minimale de amount_usdc qui doit être disponible
+    dans le carnet pour valider la liquidité (défaut 0.50 = 50%).
+    Passer une valeur plus faible (ex 0.10) pour les marchés à faible liquidité
+    quand l'EV attendu compense le slippage.
     """
     try:
         book = client.get_order_book(token_id)
@@ -139,28 +145,31 @@ def check_liquidity(client: ClobClient, token_id: str, amount_usdc: float) -> tu
 
         if not asks:
             logger.warning(f"Carnet vide pour token {token_id[:12]}...")
-            return False, 0.0
+            return False, 0.0, 0.0
 
         # Vérifier que le best ask ne dépasse pas 0.99 (max CLOB)
         best_ask = min(float(a["price"] if isinstance(a, dict) else a.price) for a in asks)
         if best_ask > 0.99:
             logger.warning(f"Best ask = {best_ask:.4f} > 0.99 (marché trop proche de résolution)")
-            return False, 0.0
+            return False, 0.0, 0.0
 
-        # Calculer la liquidité disponible côté ask
-        total = sum(float(a["size"] if isinstance(a, dict) else a.size) *
-                    float(a["price"] if isinstance(a, dict) else a.price)
-                    for a in asks)
+        # Calculer la liquidité disponible côté ask (en USDC)
+        available = sum(float(a["size"] if isinstance(a, dict) else a.size) *
+                        float(a["price"] if isinstance(a, dict) else a.price)
+                        for a in asks)
         nb_levels = len(asks)
-        logger.info(f"  Liquidité {token_id[:12]} : {total:.2f}$ sur {nb_levels} niveaux "
-                    f"(best_ask={best_ask:.4f}) pour {amount_usdc:.2f}$ demandés")
-        if total < amount_usdc * 0.50:
-            logger.warning(f"Liquidité insuffisante : {total:.1f}$ dispo pour {amount_usdc}$ demandés")
-            return False, 0.0
-        return True, best_ask
+        logger.info(f"  Liquidité {token_id[:12]} : {available:.2f}$ sur {nb_levels} niveaux "
+                    f"(best_ask={best_ask:.4f}, ratio={min_depth_ratio:.0%}) pour {amount_usdc:.2f}$ demandés")
+
+        min_required = amount_usdc * min_depth_ratio
+        if available < min_required:
+            logger.warning(f"Liquidité insuffisante : {available:.1f}$ dispo "
+                           f"(min requis {min_required:.1f}$ = {min_depth_ratio:.0%} de {amount_usdc:.2f}$)")
+            return False, 0.0, available
+        return True, best_ask, available
     except Exception as e:
         logger.warning(f"Impossible de lire l'order book : {e}")
-        return False, 0.0  # par prudence, ne pas tenter si on ne peut pas vérifier
+        return False, 0.0, 0.0
 
 
 # ── Vérification de liquidité (vente) ───────────────────────────────────────

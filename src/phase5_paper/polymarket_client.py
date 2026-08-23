@@ -125,7 +125,9 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
     seen_ids    = set()
 
     def _add_sub_markets(event):
-        event_id  = str(event.get("id", "")).strip()
+        event_id    = str(event.get("id", "")).strip()
+        event_title = str(event.get("title", "") or event.get("question", "") or "")
+        event_slug  = str(event.get("slug", "") or "").replace("-", " ")
         # Volume de l'event parent : fallback quand le sous-marché ne l'a pas
         event_vol = float(event.get("volume", 0) or 0)
         # endDate de l'event parent : fallback si absent sur le sous-marché.
@@ -146,7 +148,9 @@ def get_active_event_markets(min_volume: float = 500.0, max_pages: int = 100) ->
                 m["endDate"] = event_end
             mid = str(m.get("id", ""))
             if mid and mid not in seen_ids:
-                m["_event_id"] = event_id
+                m["_event_id"]    = event_id
+                m["_event_title"] = event_title   # ex: "Winner of the Democratic Primary for Vermont Governor"
+                m["_event_slug"]  = event_slug    # ex: "vermont governor democratic primary winner"
                 all_markets.append(m)
                 seen_ids.add(mid)
 

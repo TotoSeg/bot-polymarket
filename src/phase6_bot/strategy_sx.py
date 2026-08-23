@@ -35,11 +35,23 @@ XTRACKER_API      = "https://xtracker.polymarket.com/api"
 GAMMA_API         = "https://gamma-api.polymarket.com"
 
 SX_MAX_HOURS      = 48    # Horizon maximum d'entrée
-SX_ZSCORE_MIN     = 2.5   # Zscore saisonnier minimum pour entrer
+SX_ZSCORE_MIN     = 2.0   # Zscore saisonnier minimum pour entrer (2.5 trop strict en pratique)
 SX_MIN_SEASONAL   = 4     # Nombre minimum de fenêtres pour la moyenne saisonnière
 SX_PACE_BONUS     = 1.2   # Multiplicateur zscore si pace confirme l'improbabilité
 SX_LOOKBACK_WEEKS = 52    # Semaines d'historique à charger
 REQUEST_DELAY     = 0.2
+
+
+# ── Helper champs défensif ────────────────────────────────────────────────────
+
+def _get_field(obj: dict, *keys, default=""):
+    """Retourne la première valeur non-None trouvée parmi les clés candidates.
+    Protège contre les renommages silencieux de l'API xtracker (isActive/active, etc.)."""
+    for k in keys:
+        v = obj.get(k)
+        if v is not None:
+            return v
+    return default
 
 
 # ── Helpers HTTP ──────────────────────────────────────────────────────────────
@@ -131,10 +143,10 @@ def _get_historical_counts(handle: str) -> list:
 
     results = []
     for t in trackings:
-        if t.get("isActive"):
+        if _get_field(t, "isActive", "active", default=False):
             continue
-        start_dt = _parse_dt(t.get("startDate", ""))
-        end_dt   = _parse_dt(t.get("endDate", ""))
+        start_dt = _parse_dt(_get_field(t, "startDate", "start_date", "startAt"))
+        end_dt   = _parse_dt(_get_field(t, "endDate", "end_date", "endAt"))
         if not start_dt or not end_dt or end_dt >= now:
             continue
 
@@ -292,23 +304,32 @@ def get_sx_candidates(portfolio: dict) -> list:
     open_ids       = set(portfolio.get("positions_ouvertes", {}).keys())
 
     for tracking in active:
-        user    = tracking.get("user") or {}
-        handle  = user.get("handle") or tracking.get("handle", "")
+        user   = _get_field(tracking, "user", default={})
+        if not isinstance(user, dict):
+            user = {}
+        handle = (
+            _get_field(user, "handle", "username", "screen_name")
+            or _get_field(tracking, "handle", "username")
+        )
         if not handle:
+            logger.info(f"[SX] Tracking sans handle — champs disponibles : {list(tracking.keys())}")
             continue
 
-        end_dt     = tracking["_end_dt"]
-        start_str  = tracking.get("startDate", "")
-        slug       = _slug_from_link(tracking.get("marketLink", ""))
+        end_dt    = tracking["_end_dt"]
+        start_str = _get_field(tracking, "startDate", "start_date", "startAt")
+        market_link = _get_field(tracking, "marketLink", "market_link", "url", "link")
+        slug      = _slug_from_link(market_link)
 
         if not slug:
-            logger.debug(f"[SX] {handle} : pas de slug depuis {tracking.get('marketLink','')}")
+            logger.info(f"[SX] @{handle} : pas de slug depuis marketLink={market_link!r} "
+                        f"— champs tracking : {list(tracking.keys())}")
             continue
 
         # 2. Historique tweet counts (2 appels : posts + trackings)
         historical = _get_historical_counts(handle)
         if len(historical) < 2:
-            logger.debug(f"[SX] {handle} : historique insuffisant ({len(historical)} fenêtres)")
+            logger.info(f"[SX] @{handle} : historique insuffisant ({len(historical)} "
+                        f"fenêtres fermées) — xtracker trop récent pour ce compte")
             continue
 
         # 3. Stats saisonnières (mois de fin du marché)
@@ -321,7 +342,7 @@ def get_sx_candidates(portfolio: dict) -> list:
         events      = _unwrap(event_data) if isinstance(event_data, list) else (
                       [event_data] if isinstance(event_data, dict) else [])
         if not events:
-            logger.debug(f"[SX] Gamma : event non trouvé pour slug={slug}")
+            logger.info(f"[SX] @{handle} : event Gamma introuvable pour slug={slug}")
             continue
 
         event       = events[0]
@@ -372,8 +393,8 @@ def get_sx_candidates(portfolio: dict) -> list:
                 continue
 
             # Win rate estimé depuis le zscore (conservateur)
-            # zscore=2.5 → ~99.4% prob NO gagne, on prend 95% + ajustement
-            win_rate = min(0.999, 0.95 + (zscore_adj - 2.5) * 0.02)
+            # A SX_ZSCORE_MIN σ → 95% base, +2pp par σ supplémentaire
+            win_rate = min(0.999, 0.95 + (zscore_adj - SX_ZSCORE_MIN) * 0.02)
 
             # EV normalisé (edge vs probabilité marché)
             no_market_prob = 1.0 - yes_price

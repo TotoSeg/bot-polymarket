@@ -80,6 +80,8 @@ _KW_OTHER_RISK = [
     # Primaires / nominations : la primaire peut être annulée, un candidat peut se retirer
     "primary", "primaries", "nomination", "nominate", "nominee",
     "qualify", "qualifier", "caucus",
+    # Ballotages, rappels
+    "runoff", "run-off", "recall",
     # Marchés multi-issue où un tiers peut gagner
     "plurality", "majority winner", "most votes",
     # Événements conditionnels incertains
@@ -472,7 +474,17 @@ def run_once(dry_run: bool = False):
         # désigne "un autre candidat gagne", ce qui est bien géré par le YES/NO du
         # sous-marché. Ces marchés ne risquent pas la résolution "other" au sens
         # d'un événement non-binaire.
-        q_raw     = str(m.get("question", ""))
+        # Construire le texte combiné pour le filtre : question du sous-marché
+        # + titre et slug de l'event parent (injectés par _add_sub_markets).
+        # Nécessaire car pour les marchés neg-risk (ex: "will X be the nominee?"),
+        # la question courte peut ne pas contenir "primary"/"nominee" — seul le
+        # titre de l'event parent le révèle.
+        q_raw = " ".join(filter(None, [
+            str(m.get("question", "")),
+            str(m.get("groupItemTitle", "")),
+            str(m.get("_event_title", "")),
+            str(m.get("_event_slug", "")),
+        ]))
         is_neg_risk = bool(m.get("_event_id"))
         if _is_other_risk(q_raw):
             continue
